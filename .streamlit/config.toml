@@ -1,0 +1,11 @@
+[server]
+# 動画ファイルを扱うためアップロード上限を引き上げる（MB）
+# HF Spaces の無料枠は CPU 2 コアなので、実用上は 10 分程度までの動画を推奨
+maxUploadSize = 1000
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"

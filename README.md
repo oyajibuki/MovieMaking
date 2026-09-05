@@ -1,3 +1,14 @@
+---
+title: AutoCutter PRO
+emoji: ✂️
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: 無音・フィラーを自動カットし、声色を変換する動画編集ツール
+---
+
 # AutoCutter PRO
 
 無音カット・フィラーカット・声色変換を自動で行う動画編集ツール。
@@ -62,6 +73,47 @@ brew install ffmpeg python@3.12
 | `--fillers` | 既定リスト | カットする単語をカンマ区切りで指定 |
 | `--no-silence` / `--no-filler` | — | 各カットを無効化 |
 | `--model` | base | Whisper モデル（tiny / base / small / medium） |
+
+## Web で使う（Hugging Face Spaces）
+
+ブラウザ上で動画をアップロードして編集できるように、Docker SDK の Space としてデプロイする。
+`main` に push すると GitHub Actions が Space へ自動同期する（04.subtitle と同じ仕組み）。
+
+### 初回だけ必要な設定
+
+1. **Space を作る** — https://huggingface.co/new-space
+   - Owner: `AutoCraft502` / Space name: `autocutter-pro`
+   - SDK: **Docker**（Blank template）
+   - 別の名前にする場合は、GitHub リポジトリの Settings → Secrets and variables → Actions → Variables に
+     `HF_USER` / `HF_SPACE` を登録すれば、ワークフローがそちらを見る。
+
+2. **HF アクセストークンを作る** — https://huggingface.co/settings/tokens
+   - Type: **Write**（Space への push に必要）
+
+3. **GitHub にトークンを登録する** — リポジトリの
+   Settings → Secrets and variables → Actions → New repository secret
+   - Name: `HF_TOKEN` / Secret: 上で作ったトークン
+
+4. Actions タブから **Sync to Hugging Face Hub** を手動実行するか、`main` に何か push する。
+
+### 構成
+
+| ファイル | 役割 |
+|---|---|
+| `Dockerfile` | Python 3.12 + ffmpeg。CPU 版 torch と Whisper base モデルを焼き込む |
+| `.streamlit/config.toml` | アップロード上限 1000MB、ダークテーマ |
+| `.github/workflows/sync_to_huggingface.yml` | main への push で Space へ同期 |
+
+### 無料枠での制約
+
+HF Spaces の無料枠は **CPU 2 コア / メモリ 16GB**。GPU は無い。
+
+- Whisper は CPU 実行になるため、`medium` 以上は実用的でない。**`tiny` か `base`** を選ぶこと
+- 動画のエンコードも CPU なので、**10 分程度までの動画**を想定
+- Space はアクセスが無いとスリープし、次回起動に時間がかかる
+- ストレージは揮発性。アップロードした動画も書き出した動画も再起動で消えるため、
+  **書き出した動画は必ずダウンロードすること**
+
 
 ## モジュール構成
 
