@@ -1,0 +1,14 @@
+# AutoCutter PRO
+# Python 3.10 - 3.12 を推奨（openai-whisper / torch が 3.13+ に未対応のため）
+
+streamlit>=1.31
+moviepy>=2.0
+pydub>=0.25.1
+numpy>=1.26,<2.2
+
+# 音声認識（04.subtitle と同じ openai-whisper。faster-whisper に差し替えても動く）
+openai-whisper
+
+# 声色変換（話速を維持したピッチシフト用）
+librosa>=0.10
+soundfile>=0.12
