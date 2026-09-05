@@ -23,12 +23,18 @@ class CutSettings:
     remove_silence: bool = True
     silence_threshold_db: float = -38.0
     min_silence_len: float = 0.5
+    # True なら「素材の平均音量 - silence_relative_offset_db」を閾値にする。
+    # 小さく録れた音声を喋りごと切ってしまう事故を防げるので既定で有効。
+    silence_auto_threshold: bool = True
+    silence_relative_offset_db: float = 16.0
 
     # フィラーカット
     remove_fillers: bool = True
     filler_words: list[str] = field(
         default_factory=lambda: list(audio_analyzer.DEFAULT_FILLER_WORDS_JA)
     )
+    # Whisper は既定だと言い淀みを整形して落とすので、プロンプトで書き起こしを促す
+    prompt_for_fillers: bool = True
 
     # 共通
     margin: float = 0.08          # カット前後に残す余白（秒）
@@ -55,6 +61,9 @@ class CutResult:
     whisper_result: dict | None = None
     output_video: str | None = None
     is_audio_only: bool = False
+    # 実際に使われた無音の閾値と素材の平均音量（UI での説明用）
+    effective_threshold_db: float | None = None
+    average_loudness_db: float | None = None
 
     @property
     def new_duration(self) -> float:
@@ -108,11 +117,17 @@ def analyze(
     #    フィラー検知だけでなくテロップ出力にも使うため、常に実行する
     if whisper_result is None:
         report(0.15, f"音声認識中...（model={settings.model_size}）")
+        prompt = None
+        if settings.remove_fillers and settings.prompt_for_fillers:
+            prompt = transcriber.build_filler_prompt(
+                settings.filler_words, settings.language
+            )
         whisper_result = transcriber.transcribe(
             audio_path,
             model_size=settings.model_size,
             language=settings.language,
             word_timestamps=True,
+            initial_prompt=prompt or None,
         )
 
     segments = whisper_result["segments"] if whisper_result else []
@@ -124,12 +139,21 @@ def analyze(
         filler_cuts = audio_analyzer.detect_fillers(segments, settings.filler_words)
 
     silence_cuts: list[Segment] = []
+    average_loudness = audio_analyzer.measure_loudness(audio_path)
+    relative_offset = (
+        settings.silence_relative_offset_db if settings.silence_auto_threshold else None
+    )
+    effective_threshold = settings.silence_threshold_db
+    if settings.silence_auto_threshold and average_loudness != float("-inf"):
+        effective_threshold = average_loudness - settings.silence_relative_offset_db
+
     if settings.remove_silence:
         report(0.70, "無音区間を検出中...")
         silence_cuts = audio_analyzer.detect_silence(
             audio_path,
             threshold_db=settings.silence_threshold_db,
             min_silence_len=settings.min_silence_len,
+            relative_offset_db=relative_offset,
         )
 
     # 4. マージンを適用してから統合し、残す区間を作る
@@ -153,6 +177,8 @@ def analyze(
         subtitles=subtitles,
         whisper_result=whisper_result,
         is_audio_only=audio_only,
+        effective_threshold_db=effective_threshold,
+        average_loudness_db=average_loudness,
     )
 
 

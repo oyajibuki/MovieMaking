@@ -39,19 +39,38 @@ def _normalize(text: str) -> str:
 # 無音検知
 # --------------------------------------------------------------------------
 
+def resolve_threshold(audio, threshold_db: float, relative_offset_db: float | None) -> float:
+    """実際に使う無音の閾値（dBFS）を決める。
+
+    relative_offset_db が指定されていれば、素材の平均音量から
+    その分だけ下を閾値にする。小さく録れた音声でも喋っている部分を
+    無音と誤判定しないようにするための調整。
+    """
+    if relative_offset_db is None:
+        return threshold_db
+
+    average = audio.dBFS
+    if average == float("-inf"):  # 完全な無音
+        return threshold_db
+    return average - relative_offset_db
+
+
 def detect_silence(
     audio_path: str,
     threshold_db: float = -38.0,
     min_silence_len: float = 0.5,
     seek_step: int = 10,
+    relative_offset_db: float | None = None,
 ) -> list[Segment]:
-    """音量が threshold_db 以下の状態が min_silence_len 秒以上続く区間を返す。
+    """音量が閾値以下の状態が min_silence_len 秒以上続く区間を返す。
 
     Args:
         audio_path: wav 等の音声ファイルパス
-        threshold_db: 無音とみなす閾値（dBFS）。-30 〜 -45 あたりが実用値
+        threshold_db: 無音とみなす閾値（dBFS）。relative_offset_db 未指定時に使う
         min_silence_len: 無音とみなす最短の長さ（秒）
         seek_step: 走査ステップ（ms）。小さいほど精密だが遅い
+        relative_offset_db: 指定すると「素材の平均音量 - この値」を閾値にする。
+            静かに録れた素材で喋りごと切ってしまう事故を防げる（16 前後が目安）
 
     Returns:
         [(start_sec, end_sec), ...] 昇順
@@ -60,13 +79,22 @@ def detect_silence(
     from pydub.silence import detect_silence as _pydub_detect_silence
 
     audio = AudioSegment.from_file(audio_path)
+    threshold = resolve_threshold(audio, threshold_db, relative_offset_db)
+
     ranges_ms = _pydub_detect_silence(
         audio,
         min_silence_len=int(min_silence_len * 1000),
-        silence_thresh=threshold_db,
+        silence_thresh=threshold,
         seek_step=seek_step,
     )
     return [(start / 1000.0, end / 1000.0) for start, end in ranges_ms]
+
+
+def measure_loudness(audio_path: str) -> float:
+    """素材の平均音量（dBFS）を返す。UI に実効閾値を表示するために使う。"""
+    from pydub import AudioSegment
+
+    return AudioSegment.from_file(audio_path).dBFS
 
 
 # --------------------------------------------------------------------------
@@ -80,9 +108,12 @@ def detect_fillers(
 ) -> list[Segment]:
     """Whisper の認識結果からフィラーワードの区間を返す。
 
-    `model.transcribe(..., word_timestamps=True)` の結果なら単語単位で、
-    単語タイムスタンプが無い場合はセグメント全体がフィラーのみで構成される
-    ケースに限りセグメント単位で検出する（誤カットを避けるため保守的に判定）。
+    Whisper の日本語の単語タイムスタンプは "えーと" が 'え' 'ー' 'と' のように
+    1 文字ずつに割れることが多い。そのため単語 1 つずつではなく、
+    連続する単語をつなげた文字列と照合する（最長一致を優先）。
+
+    単語タイムスタンプが無い場合は、セグメント全体がフィラーのみで構成される
+    ケースに限り検出する（誤カットを避けるため保守的に判定）。
 
     Args:
         whisper_result: transcribe() の戻り値、または segments のリスト
@@ -99,17 +130,14 @@ def detect_fillers(
     if not targets:
         return []
 
+    max_len = max(len(t) for t in targets)
     segments = whisper_result["segments"] if isinstance(whisper_result, dict) else whisper_result
 
     cuts: list[Segment] = []
     for seg in segments:
         words = seg.get("words") or []
         if words:
-            for word in words:
-                if _normalize(word.get("word", "")) in targets:
-                    start = float(word["start"]) - padding
-                    end = float(word["end"]) + padding
-                    cuts.append((max(0.0, start), end))
+            cuts.extend(_match_filler_runs(words, targets, max_len, padding))
         else:
             # 単語タイムスタンプが無い場合、セグメント全体がフィラーのときのみカット
             if _normalize(seg.get("text", "")) in targets:
@@ -118,6 +146,40 @@ def detect_fillers(
                 cuts.append((max(0.0, start), end))
 
     return merge_segments(cuts)
+
+
+def _match_filler_runs(
+    words: Sequence[dict],
+    targets: set[str],
+    max_len: int,
+    padding: float,
+) -> list[Segment]:
+    """連続する単語をつなげてフィラーと照合する（最長一致・非重複）。"""
+    normalized = [_normalize(w.get("word", "")) for w in words]
+
+    cuts: list[Segment] = []
+    i = 0
+    while i < len(words):
+        best_end = None  # 一致した範囲の終端インデックス（排他）
+        joined = ""
+
+        for j in range(i, len(words)):
+            joined += normalized[j]
+            if len(joined) > max_len:
+                break
+            if joined in targets:
+                best_end = j + 1  # より長い一致があれば上書きされる
+
+        if best_end is None:
+            i += 1
+            continue
+
+        start = float(words[i]["start"]) - padding
+        end = float(words[best_end - 1]["end"]) + padding
+        cuts.append((max(0.0, start), end))
+        i = best_end  # 一致した範囲は飛ばす
+
+    return cuts
 
 
 # --------------------------------------------------------------------------

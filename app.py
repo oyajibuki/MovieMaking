@@ -87,6 +87,8 @@ def analyze(
     video_path,
     audio_path_in,
     remove_silence,
+    auto_threshold,
+    sensitivity_db,
     threshold_db,
     min_silence_len,
     remove_fillers,
@@ -104,6 +106,8 @@ def analyze(
     settings = pipeline.CutSettings(
         remove_silence=remove_silence,
         silence_threshold_db=threshold_db,
+        silence_auto_threshold=auto_threshold,
+        silence_relative_offset_db=sensitivity_db,
         min_silence_len=min_silence_len,
         remove_fillers=remove_fillers,
         filler_words=parse_fillers(filler_text),
@@ -143,7 +147,15 @@ def analyze(
         f"（{result.removed_ratio * 100:.1f}%） |\n"
         f"| 無音カット | {len(result.silence_cuts)} 箇所 |\n"
         f"| フィラーカット | {len(result.filler_cuts)} 箇所 |\n"
+        f"| 素材の平均音量 | {result.average_loudness_db:.1f} dBFS |\n"
+        f"| 実際に使った無音の閾値 | {result.effective_threshold_db:.1f} dBFS |\n"
     )
+
+    if result.removed_ratio > 0.6:
+        stats += (
+            "\n> ⚠️ 6 割以上カットされています。喋っている部分まで無音と"
+            "判定されている可能性があります。「感度」の数値を大きくしてください。\n"
+        )
 
     cuts = [
         [kind, format_hms(s), format_hms(e), round(e - s, 2)]
@@ -272,13 +284,31 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
 
             with gr.Accordion("🔇 無音カット", open=True):
                 remove_silence = gr.Checkbox(label="無音区間をカットする", value=True)
+                auto_threshold = gr.Checkbox(
+                    label="素材の音量に合わせて自動調整（推奨）",
+                    value=True,
+                    info="小さく録れた音声でも、喋っている部分を無音と誤判定しにくくなります。",
+                )
+                sensitivity_db = gr.Slider(
+                    5, 35, value=16, step=1,
+                    label="感度（平均音量から何 dB 下を無音とみなすか）",
+                    info="カットされ過ぎるときは大きく、カットが足りないときは小さくしてください。",
+                    visible=True,
+                )
                 threshold_db = gr.Slider(
                     -60, -10, value=-38, step=1,
-                    label="無音とみなす音量（dBFS）",
-                    info="小さい値ほど「本当に静か」な部分だけを切ります。切りすぎるときは下げてください。",
+                    label="無音とみなす音量（dBFS・固定値）",
+                    info="自動調整を切ったときに使う絶対値です。",
+                    visible=False,
                 )
                 min_silence_len = gr.Slider(
                     0.1, 3.0, value=0.5, step=0.1, label="無音とみなす最短の長さ（秒）"
+                )
+
+                auto_threshold.change(
+                    lambda auto: (gr.update(visible=auto), gr.update(visible=not auto)),
+                    inputs=[auto_threshold],
+                    outputs=[sensitivity_db, threshold_db],
                 )
 
             with gr.Accordion("🗣️ フィラーカット", open=True):
@@ -348,7 +378,8 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
     analyze_btn.click(
         analyze,
         inputs=[
-            video_in, audio_in, remove_silence, threshold_db, min_silence_len,
+            video_in, audio_in, remove_silence, auto_threshold, sensitivity_db,
+            threshold_db, min_silence_len,
             remove_fillers, filler_text, margin_ms, pitch, model_size, language_label,
         ],
         outputs=[stats_out, cuts_out, subs_out, state],

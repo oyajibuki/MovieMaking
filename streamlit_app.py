@@ -84,11 +84,24 @@ with st.sidebar:
 
     st.subheader("🔇 無音カット")
     remove_silence = st.checkbox("無音区間をカットする", value=True)
-    silence_threshold_db = st.slider(
-        "無音とみなす音量（dBFS）", -60.0, -10.0, -38.0, 1.0,
-        help="小さい値ほど「本当に静か」な部分だけを切ります。切りすぎるときは下げてください。",
+    auto_threshold = st.checkbox(
+        "素材の音量に合わせて自動調整（推奨）", value=True,
+        help="小さく録れた音声でも、喋っている部分を無音と誤判定しにくくなります。",
         disabled=not remove_silence,
     )
+    if auto_threshold:
+        sensitivity_db = st.slider(
+            "感度（平均音量から何 dB 下を無音とみなすか）", 5.0, 35.0, 16.0, 1.0,
+            help="カットされ過ぎるときは大きく、カットが足りないときは小さくしてください。",
+            disabled=not remove_silence,
+        )
+        silence_threshold_db = -38.0
+    else:
+        sensitivity_db = 16.0
+        silence_threshold_db = st.slider(
+            "無音とみなす音量（dBFS・固定値）", -60.0, -10.0, -38.0, 1.0,
+            disabled=not remove_silence,
+        )
     min_silence_len = st.slider(
         "無音とみなす最短の長さ（秒）", 0.1, 3.0, 0.5, 0.1,
         disabled=not remove_silence,
@@ -163,6 +176,8 @@ filler_words = [w.strip() for w in filler_text.replace("、", ",").split(",") if
 settings = pipeline.CutSettings(
     remove_silence=remove_silence,
     silence_threshold_db=silence_threshold_db,
+    silence_auto_threshold=auto_threshold,
+    silence_relative_offset_db=sensitivity_db,
     min_silence_len=min_silence_len,
     remove_fillers=remove_fillers,
     filler_words=filler_words,
@@ -207,6 +222,16 @@ c1.metric("元の長さ", format_hms(result.original_duration))
 c2.metric("編集後", format_hms(result.new_duration))
 c3.metric("カット量", format_hms(result.removed_duration), f"-{result.removed_ratio * 100:.1f}%")
 c4.metric("カット箇所", f"{len(result.silence_cuts) + len(result.filler_cuts)} 箇所")
+
+st.caption(
+    f"素材の平均音量 {result.average_loudness_db:.1f} dBFS / "
+    f"実際に使った無音の閾値 {result.effective_threshold_db:.1f} dBFS"
+)
+if result.removed_ratio > 0.6:
+    st.warning(
+        "6 割以上カットされています。喋っている部分まで無音と判定されている"
+        "可能性があります。「感度」の数値を大きくしてください。"
+    )
 
 with st.expander(f"🔇 無音カット {len(result.silence_cuts)} 箇所 / 🗣️ フィラーカット {len(result.filler_cuts)} 箇所"):
     tab_silence, tab_filler = st.tabs(["無音", "フィラー"])

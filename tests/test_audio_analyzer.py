@@ -137,6 +137,71 @@ class TestDetectFillers(unittest.TestCase):
         self.assertEqual(cuts[0][0], 0.0)
 
 
+class TestFragmentedFillers(unittest.TestCase):
+    """Whisper の日本語は 1 文字ずつに割れることがあるため、連結して照合する。"""
+
+    def _seg(self, tokens):
+        words, t = [], 0.0
+        for tok in tokens:
+            words.append({"start": t, "end": t + 0.1, "word": tok})
+            t += 0.1
+        return [{"start": 0.0, "end": t, "text": "".join(tokens), "words": words}]
+
+    def test_matches_filler_split_across_tokens(self):
+        seg = self._seg(["え", "ー", "と", "本題"])
+        cuts = aa.detect_fillers(seg, ["えーと"], padding=0.0)
+        self.assertEqual(len(cuts), 1)
+        self.assertAlmostEqual(cuts[0][0], 0.0)
+        self.assertAlmostEqual(cuts[0][1], 0.3)
+
+    def test_prefers_longest_match(self):
+        # 「えー」も「えーと」も候補にあるとき、長い方を採用する
+        seg = self._seg(["え", "ー", "と", "本題"])
+        cuts = aa.detect_fillers(seg, ["えー", "えーと"], padding=0.0)
+        self.assertEqual(len(cuts), 1)
+        self.assertAlmostEqual(cuts[0][1], 0.3)
+
+    def test_does_not_span_past_the_filler(self):
+        seg = self._seg(["え", "ー", "本題", "です"])
+        cuts = aa.detect_fillers(seg, ["えー"], padding=0.0)
+        self.assertAlmostEqual(cuts[0][1], 0.2)
+
+    def test_no_match_leaves_everything(self):
+        seg = self._seg(["こんにちは", "本題", "です"])
+        self.assertEqual(aa.detect_fillers(seg, ["えーと"], padding=0.0), [])
+
+    def test_punctuation_between_fragments_is_ignored(self):
+        seg = self._seg(["えー", "と、", "本題"])
+        cuts = aa.detect_fillers(seg, ["えーと"], padding=0.0)
+        self.assertEqual(len(cuts), 1)
+        self.assertAlmostEqual(cuts[0][1], 0.2)
+
+
+class TestRelativeThreshold(unittest.TestCase):
+    """静かに録れた素材で喋りごと切ってしまわないための相対閾値。"""
+
+    class FakeAudio:
+        def __init__(self, dbfs):
+            self.dBFS = dbfs
+
+    def test_absolute_threshold_when_offset_is_none(self):
+        self.assertEqual(aa.resolve_threshold(self.FakeAudio(-34.9), -38.0, None), -38.0)
+
+    def test_relative_threshold_follows_material_loudness(self):
+        # 平均 -34.9dBFS の素材なら -50.9dBFS が閾値になる
+        self.assertAlmostEqual(
+            aa.resolve_threshold(self.FakeAudio(-34.9), -38.0, 16.0), -50.9
+        )
+
+    def test_quiet_material_gets_a_lower_threshold_than_the_fixed_default(self):
+        quiet = aa.resolve_threshold(self.FakeAudio(-34.9), -38.0, 16.0)
+        self.assertLess(quiet, -38.0)
+
+    def test_silent_material_falls_back_to_absolute(self):
+        silent = self.FakeAudio(float("-inf"))
+        self.assertEqual(aa.resolve_threshold(silent, -38.0, 16.0), -38.0)
+
+
 class TestSubtitleOutput(unittest.TestCase):
     def test_srt_format(self):
         srt = su.create_srt_content([{"start": 0.0, "end": 1.5, "text": "テスト"}])

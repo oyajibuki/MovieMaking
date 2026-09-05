@@ -56,20 +56,29 @@ def transcribe(
     word_timestamps: bool = True,
     backend: str = "auto",
     cache_model: bool = True,
+    initial_prompt: str | None = None,
 ) -> dict:
     """音声認識を実行し、Whisper 互換の {"segments": [...], "text": str} を返す。
 
     各 segment は start / end / text を持ち、word_timestamps=True なら
     words（start / end / word）も含む。この形は既存アプリの出力と互換。
+
+    initial_prompt に「えーと、あのー」のような例を渡すと、Whisper が
+    整形せずに言い淀みも書き起こしやすくなる（フィラーカットの精度が上がる）。
     """
     if model is None:
         model = load_model(model_size, backend=backend, cache=cache_model)
 
     if _is_faster_whisper(model):
-        return _transcribe_faster(model, media_path, language, word_timestamps)
+        return _transcribe_faster(
+            model, media_path, language, word_timestamps, initial_prompt
+        )
 
     result = model.transcribe(
-        media_path, language=language, word_timestamps=word_timestamps
+        media_path,
+        language=language,
+        word_timestamps=word_timestamps,
+        initial_prompt=initial_prompt,
     )
     return {"segments": result["segments"], "text": result.get("text", "")}
 
@@ -78,9 +87,14 @@ def _is_faster_whisper(model) -> bool:
     return type(model).__module__.startswith("faster_whisper")
 
 
-def _transcribe_faster(model, media_path, language, word_timestamps) -> dict:
+def _transcribe_faster(
+    model, media_path, language, word_timestamps, initial_prompt=None
+) -> dict:
     segments_iter, _info = model.transcribe(
-        media_path, language=language, word_timestamps=word_timestamps
+        media_path,
+        language=language,
+        word_timestamps=word_timestamps,
+        initial_prompt=initial_prompt,
     )
 
     segments = []
@@ -98,3 +112,18 @@ def _transcribe_faster(model, media_path, language, word_timestamps) -> dict:
         segments.append(item)
 
     return {"segments": segments, "text": "".join(s["text"] for s in segments)}
+
+
+def build_filler_prompt(filler_words, language: str = "ja") -> str:
+    """フィラーを書き起こさせるための initial_prompt を組み立てる。
+
+    Whisper は既定では言い淀みを整形して落としてしまうことが多い。
+    実際にフィラーを含む文例を先に見せると、逐語的に出力しやすくなる。
+    """
+    examples = "、".join(list(filler_words)[:8]) if filler_words else ""
+    if not examples:
+        return ""
+
+    if language == "ja":
+        return f"{examples}、といった言い淀みもそのまま書き起こしてください。"
+    return f"Transcribe verbatim, including filler words such as {examples}."

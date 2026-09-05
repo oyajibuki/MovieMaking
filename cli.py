@@ -31,7 +31,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--srt", help="出力する SRT のパス（省略時は出力しない）")
 
     p.add_argument("--no-silence", action="store_true", help="無音カットを無効化")
-    p.add_argument("--threshold", type=float, default=-38.0, help="無音とみなす dBFS（既定 -38）")
+    p.add_argument(
+        "--sensitivity", type=float, default=16.0,
+        help="素材の平均音量から何 dB 下を無音とみなすか（既定 16）。"
+             "カットされ過ぎるときは大きくする",
+    )
+    p.add_argument(
+        "--threshold", type=float, default=None,
+        help="無音とみなす dBFS を固定値で指定する（指定すると --sensitivity は無視される）",
+    )
     p.add_argument("--min-silence", type=float, default=0.5, help="無音とみなす最短秒数（既定 0.5）")
 
     p.add_argument("--no-filler", action="store_true", help="フィラーカットを無効化")
@@ -71,7 +79,9 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = pipeline.CutSettings(
         remove_silence=not args.no_silence,
-        silence_threshold_db=args.threshold,
+        silence_threshold_db=args.threshold if args.threshold is not None else -38.0,
+        silence_auto_threshold=args.threshold is None,
+        silence_relative_offset_db=args.sensitivity,
         min_silence_len=args.min_silence,
         remove_fillers=not args.no_filler,
         filler_words=fillers,
@@ -90,11 +100,21 @@ def main(argv: list[str] | None = None) -> int:
 
         kind = "音声" if result.is_audio_only else "動画"
         print(
-            f"\n[{kind}] 元の長さ {result.original_duration:.2f}s "
+            f"\n平均音量 {result.average_loudness_db:.1f} dBFS / "
+            f"無音の閾値 {result.effective_threshold_db:.1f} dBFS"
+        )
+        print(
+            f"[{kind}] 元の長さ {result.original_duration:.2f}s "
             f"→ 編集後 {result.new_duration:.2f}s "
             f"({result.removed_ratio * 100:.1f}% カット / "
             f"無音 {len(result.silence_cuts)} 箇所, フィラー {len(result.filler_cuts)} 箇所)"
         )
+
+        if result.removed_ratio > 0.6:
+            print(
+                "⚠️  6 割以上カットされています。喋っている部分まで無音と"
+                "判定されている可能性があります。--sensitivity を大きくしてください。"
+            )
 
         if args.srt:
             with open(args.srt, "w", encoding="utf-8") as f:
