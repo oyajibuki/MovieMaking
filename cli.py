@@ -1,8 +1,11 @@
 """
 cli.py — AutoCutter PRO のコマンドライン版
 
+動画でも音声のみ（mp3 / m4a / wav / flac / ogg など）でも扱える。
+
 例:
   python cli.py input.mp4 -o output.mp4 --pitch 4 --threshold -38 --min-silence 0.5
+  python cli.py input.m4a --pitch 4 --srt output.srt
 """
 
 from __future__ import annotations
@@ -12,13 +15,19 @@ import os
 import sys
 import tempfile
 
-from autocutter import audio_analyzer, pipeline
+from autocutter import audio_analyzer, pipeline, video_editor
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="無音・フィラーを自動カットし、声色を変換する")
-    p.add_argument("input", help="入力動画")
-    p.add_argument("-o", "--output", help="出力 mp4（既定: <入力名>_cut.mp4）")
+    p = argparse.ArgumentParser(
+        description="無音・フィラーを自動カットし、声色を変換する（動画・音声どちらも可）"
+    )
+    p.add_argument("input", help="入力ファイル（動画 または 音声）")
+    p.add_argument(
+        "-o", "--output",
+        help="出力パス（既定: <入力名>_cut.<入力と同じ拡張子>）。"
+             "音声入力の場合は拡張子で出力形式が決まる",
+    )
     p.add_argument("--srt", help="出力する SRT のパス（省略時は出力しない）")
 
     p.add_argument("--no-silence", action="store_true", help="無音カットを無効化")
@@ -45,7 +54,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"入力が見つかりません: {args.input}", file=sys.stderr)
         return 1
 
-    output = args.output or f"{os.path.splitext(args.input)[0]}_cut.mp4"
+    # 音声のみの入力なら、出力も同じ形式に揃える
+    if args.output:
+        output = args.output
+    elif video_editor.is_audio_only(args.input):
+        ext = video_editor.supported_output_extension(args.input)
+        output = f"{os.path.splitext(args.input)[0]}_cut{ext}"
+    else:
+        output = f"{os.path.splitext(args.input)[0]}_cut.mp4"
 
     fillers = (
         [w.strip() for w in args.fillers.replace("、", ",").split(",") if w.strip()]
@@ -72,8 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="autocutter_") as work_dir:
         result = pipeline.analyze(args.input, settings, work_dir, progress_callback=report)
 
+        kind = "音声" if result.is_audio_only else "動画"
         print(
-            f"\n元の長さ {result.original_duration:.2f}s → 編集後 {result.new_duration:.2f}s "
+            f"\n[{kind}] 元の長さ {result.original_duration:.2f}s "
+            f"→ 編集後 {result.new_duration:.2f}s "
             f"({result.removed_ratio * 100:.1f}% カット / "
             f"無音 {len(result.silence_cuts)} 箇所, フィラー {len(result.filler_cuts)} 箇所)"
         )
@@ -86,7 +104,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             return 0
 
-        pipeline.render(args.input, result, settings, output, work_dir, report)
+        # 出力形式が書き出し時に変わることがあるので、実際のパスを受け取る
+        output = pipeline.render(args.input, result, settings, output, work_dir, report)
         print(f"書き出しました: {output}")
 
     return 0

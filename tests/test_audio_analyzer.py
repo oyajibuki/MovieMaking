@@ -171,5 +171,36 @@ class TestVoiceChangerMath(unittest.TestCase):
         self.assertEqual(vc.shift_pitch_file("in.wav", "out.wav", 0), "in.wav")
 
 
+class TestMediaTypeDetection(unittest.TestCase):
+    """拡張子だけで判定できる部分のテスト（ffmpeg 不要）。"""
+
+    def setUp(self):
+        from autocutter import video_editor
+        self.ve = video_editor
+
+    def test_audio_extensions_detected(self):
+        for name in ["a.mp3", "a.M4A", "a.wav", "a.flac", "a.ogg", "a.opus", "a.aac", "a.aiff"]:
+            self.assertTrue(self.ve.is_audio_only(name), name)
+
+    def test_output_extension_matches_supported_input(self):
+        self.assertEqual(self.ve.supported_output_extension("x.mp3"), ".mp3")
+        self.assertEqual(self.ve.supported_output_extension("x.M4A"), ".m4a")
+        self.assertEqual(self.ve.supported_output_extension("x.flac"), ".flac")
+
+    def test_unsupported_output_extension_falls_back_to_m4a(self):
+        self.assertEqual(self.ve.supported_output_extension("x.wma"), ".m4a")
+        self.assertEqual(self.ve.supported_output_extension("x.caf"), ".m4a")
+
+    def test_every_audio_extension_has_an_output_target(self):
+        # 入力として受け付ける形式は、必ず何らかの形式で書き出せること
+        for ext in self.ve.AUDIO_EXTENSIONS:
+            out = self.ve.supported_output_extension("x" + ext)
+            self.assertIn(out, self.ve._EXPORT_FORMATS, ext)
+
+    def test_ogg_has_a_fallback_encoder_candidate(self):
+        # libvorbis を持たない ffmpeg ビルドがあるため候補が 2 つ以上必要
+        self.assertGreaterEqual(len(self.ve._EXPORT_FORMATS[".ogg"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

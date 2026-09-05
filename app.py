@@ -85,6 +85,7 @@ def run_transcribe(audio_path: str, model_size: str, language: str) -> dict:
 
 def analyze(
     video_path,
+    audio_path_in,
     remove_silence,
     threshold_db,
     min_silence_len,
@@ -96,8 +97,9 @@ def analyze(
     language_label,
     progress=gr.Progress(),
 ):
-    if not video_path:
-        raise gr.Error("先に動画をアップロードしてください。")
+    media_path = video_path or audio_path_in
+    if not media_path:
+        raise gr.Error("先に動画または音声ファイルをアップロードしてください。")
 
     settings = pipeline.CutSettings(
         remove_silence=remove_silence,
@@ -117,7 +119,7 @@ def analyze(
         # 1. 音声抽出（この wav は後段の解析・声色変換で使い回す）
         progress(0.05, desc="音声を抽出中...")
         audio_path = os.path.join(work_dir, "source_audio.wav")
-        video_editor.extract_audio(video_path, audio_path)
+        video_editor.extract_audio(media_path, audio_path)
 
         # 2. 音声認識（ZeroGPU ではここだけ GPU）
         progress(0.20, desc=f"音声認識中...（model={model_size}）")
@@ -126,7 +128,7 @@ def analyze(
         # 3. カット区間の算出と字幕リマップ
         progress(0.70, desc="カット区間を算出中...")
         result = pipeline.analyze(
-            video_path, settings, work_dir, whisper_result=whisper_result
+            media_path, settings, work_dir, whisper_result=whisper_result
         )
     except Exception as e:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -152,8 +154,11 @@ def analyze(
 
     subs = [[round(s["start"], 2), round(s["end"], 2), s["text"]] for s in result.subtitles]
 
+    kind = "音声" if result.is_audio_only else "動画"
+    stats = stats.replace("### 解析結果", f"### 解析結果（{kind}）")
+
     state = {
-        "video_path": video_path,
+        "media_path": media_path,
         "work_dir": work_dir,
         "result": result,
         "settings": settings,
@@ -206,26 +211,36 @@ def export_subtitles(state, sub_rows):
     return [srt_path, ass_path]
 
 
-def render_video(state, progress=gr.Progress()):
+def render_media(state, progress=gr.Progress()):
+    """編集後のファイルを書き出す。返り値は (動画, 音声) で、該当しない方は None。"""
     if not state:
         raise gr.Error("先に解析を実行してください。")
 
     result = state["result"]
     settings = state["settings"]
     work_dir = state["work_dir"]
-    output_path = os.path.join(work_dir, "autocutter_output.mp4")
+    media_path = state["media_path"]
+
+    if result.is_audio_only:
+        ext = video_editor.supported_output_extension(media_path)
+    else:
+        ext = ".mp4"
+    output_path = os.path.join(work_dir, f"autocutter_output{ext}")
 
     def report(ratio, message):
         progress(ratio, desc=message)
 
     try:
-        pipeline.render(
-            state["video_path"], result, settings, output_path, work_dir, report
+        # 出力形式が書き出し時に変わることがあるので、実際のパスを受け取る
+        output_path = pipeline.render(
+            media_path, result, settings, output_path, work_dir, report
         )
     except Exception as e:
         raise gr.Error(f"書き出しに失敗しました: {e}") from e
 
-    return output_path
+    if result.is_audio_only:
+        return gr.update(value=None, visible=False), gr.update(value=output_path, visible=True)
+    return gr.update(value=output_path, visible=True), gr.update(value=None, visible=False)
 
 
 # --------------------------------------------------------------------------
@@ -237,13 +252,23 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
 
     gr.Markdown(
         "# ✂️ AutoCutter PRO\n"
-        "無音・フィラーを自動カットし、声色を変えて書き出す動画編集ツール。"
-        "カット後のタイミングに補正したテロップ（SRT / ASS）も出力します。"
+        "無音・フィラーを自動カットし、声色を変えて書き出す動画・音声編集ツール。"
+        "カット後のタイミングに補正したテロップ（SRT / ASS）も出力します。\n\n"
+        "動画（mp4 / mov など）と、音声のみ（mp3 / m4a / wav / flac / ogg / aac など）の"
+        "どちらにも対応しています。"
     )
 
     with gr.Row():
         with gr.Column(scale=1):
-            video_in = gr.Video(label="動画をアップロード", sources=["upload"])
+            with gr.Tabs():
+                with gr.Tab("🎬 動画"):
+                    video_in = gr.Video(label="動画をアップロード", sources=["upload"])
+                with gr.Tab("🎵 音声のみ"):
+                    audio_in = gr.Audio(
+                        label="音声をアップロード（mp3 / m4a / wav / flac / ogg / aac など）",
+                        sources=["upload"],
+                        type="filepath",
+                    )
 
             with gr.Accordion("🔇 無音カット", open=True):
                 remove_silence = gr.Checkbox(label="無音区間をカットする", value=True)
@@ -290,7 +315,7 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
             analyze_btn = gr.Button("🔍 解析する", variant="primary")
 
         with gr.Column(scale=1):
-            stats_out = gr.Markdown("動画をアップロードして「解析する」を押してください。")
+            stats_out = gr.Markdown("動画または音声をアップロードして「解析する」を押してください。")
 
             cuts_out = gr.Dataframe(
                 headers=["種別", "開始", "終了", "長さ(秒)"],
@@ -308,10 +333,11 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
 
             with gr.Row():
                 srt_btn = gr.Button("📝 テロップを書き出す")
-                render_btn = gr.Button("🎬 動画を書き出す", variant="primary")
+                render_btn = gr.Button("🎬 動画 / 音声を書き出す", variant="primary")
 
             subs_files = gr.File(label="SRT / ASS", file_count="multiple")
-            video_out = gr.Video(label="編集済み動画")
+            video_out = gr.Video(label="編集済み動画", visible=True)
+            audio_out = gr.Audio(label="編集済み音声", visible=False)
 
     gr.Markdown(
         "---\n"
@@ -322,13 +348,13 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
     analyze_btn.click(
         analyze,
         inputs=[
-            video_in, remove_silence, threshold_db, min_silence_len,
+            video_in, audio_in, remove_silence, threshold_db, min_silence_len,
             remove_fillers, filler_text, margin_ms, pitch, model_size, language_label,
         ],
         outputs=[stats_out, cuts_out, subs_out, state],
     )
     srt_btn.click(export_subtitles, inputs=[state, subs_out], outputs=[subs_files])
-    render_btn.click(render_video, inputs=[state], outputs=[video_out])
+    render_btn.click(render_media, inputs=[state], outputs=[video_out, audio_out])
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ short_description: 無音・フィラーを自動カットし、声色を変換�
 
 # AutoCutter PRO
 
-無音カット・フィラーカット・声色変換を自動で行う動画編集ツール。
+無音カット・フィラーカット・声色変換を自動で行う動画・音声編集ツール。
 テロップ生成は既存の [04.subtitle（AI Subtitle）](../04.subtitle) と同じ Whisper ベースのロジックを流用している。
 
 ## できること
@@ -23,6 +23,17 @@ short_description: 無音・フィラーを自動カットし、声色を変換�
 | 声色変換 | 身バレ防止のためのピッチシフト。話速を維持する高品質方式（librosa）と簡易方式（pydub） |
 | テロップ出力 | カット後のタイミングにズレを補正した SRT / ASS を出力 |
 | マージン調整 | カット前後に余白を残し、ブツ切り感を防ぐ |
+
+## 対応フォーマット
+
+| 種別 | 拡張子 |
+|---|---|
+| 動画 | `mp4` `mov` `mkv` `avi` `m4v` |
+| 音声 | `mp3` `m4a` `wav` `flac` `ogg` `oga` `opus` `aac` `aiff` `wma` など |
+
+音声のみのファイルを入れた場合は、映像を扱わず音声だけをカット・変換して
+**入力と同じ形式で**書き出す（その形式でエンコードできない ffmpeg ビルドでは
+自動的に `m4a` へ切り替わる）。テロップの出力は動画・音声どちらでも同じ。
 
 ## セットアップ
 
@@ -47,8 +58,9 @@ brew install ffmpeg python@3.12
 ./.venv/bin/python app.py
 ```
 
-http://localhost:7860 が開く。動画をアップロード →「解析する」でカット箇所とテロップを確認
-→「動画を書き出す」。テロップは書き出し前に表内で直接編集できる。
+http://localhost:7860 が開く。「動画」「音声のみ」のタブから素材をアップロード
+→「解析する」でカット箇所とテロップを確認 →「動画 / 音声を書き出す」。
+テロップは書き出し前に表内で直接編集できる。
 
 ### GUI（Streamlit / ローカル専用）
 
@@ -62,6 +74,12 @@ http://localhost:7860 が開く。動画をアップロード →「解析する
 
 ```bash
 ./.venv/bin/python cli.py input.mp4 -o output.mp4 --srt output.srt --pitch 4
+```
+
+音声のみのファイルも同じように渡せる。出力を省略すると入力と同じ形式になる。
+
+```bash
+./.venv/bin/python cli.py input.m4a --srt output.srt --pitch 4
 ```
 
 カット箇所だけ先に確認したいときは `--dry-run` を付ける。
@@ -79,6 +97,7 @@ http://localhost:7860 が開く。動画をアップロード →「解析する
 | `--margin` | 0.08 | カット前後に残す余白（秒） |
 | `--pitch` | 0 | ピッチ変化量（半音）。±3〜5 が実用的 |
 | `--fillers` | 既定リスト | カットする単語をカンマ区切りで指定 |
+| `-o` | 入力と同じ形式 | 出力パス。音声入力では拡張子で出力形式が決まる |
 | `--no-silence` / `--no-filler` | — | 各カットを無効化 |
 | `--model` | base | Whisper モデル（tiny / base / small / medium） |
 
@@ -156,7 +175,7 @@ Hardware に **ZeroGPU** を選んだ場合、音声認識だけが GPU で動�
 autocutter/
 ├── audio_analyzer.py   無音検知・フィラー検知・Keep List 算出・字幕リマップ
 ├── voice_changer.py    ピッチシフト（librosa / pydub）
-├── video_editor.py     音声抽出・カット・結合・エンコード（moviepy 1.x/2.x 両対応）
+├── video_editor.py     音声抽出・カット・結合・エンコード（動画は moviepy、音声のみは pydub）
 ├── transcriber.py      Whisper ラッパー（openai-whisper / faster-whisper）
 ├── subtitle_utils.py   SRT / ASS 出力（04.subtitle から流用）
 └── pipeline.py         上記を設計書のフロー順に繋ぐオーケストレータ
@@ -206,7 +225,7 @@ result = pipeline.analyze(
 ./run_tests.sh
 ```
 
-区間演算・字幕リマップ・SRT/ASS 出力は重い依存なしで実行できる（26 件）。
+区間演算・字幕リマップ・SRT/ASS 出力・メディア種別判定は重い依存なしで実行できる（31 件）。
 セットアップ前でも、システムの python3 が 3.13+ でも通る。
 
 `python3 -m unittest discover -s tests` を直接叩く場合は、必ずこのプロジェクトの
@@ -218,3 +237,5 @@ result = pipeline.analyze(
 - 声色変換の「簡易方式（pydub）」はピッチと同時に再生速度も変わるため、映像とズレる。
   動画書き出しでは「高品質（librosa）」を使うこと。ズレを検出した場合は書き出し時にエラーになる。
 - ピッチ変化量は ±12 半音に制限している（それ以上は聞き取れなくなるため）。
+- 音声のみの入力は `pydub` で処理する。moviepy の `VideoFileClip` は映像トラックが
+  無いファイルを開けないため、音声抽出は ffmpeg を直接呼んでいる。

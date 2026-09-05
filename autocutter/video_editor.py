@@ -1,19 +1,73 @@
 """
 video_editor.py — 編集・出力モジュール
 
-「残す区間（Keep List）」に従って映像を切り出し、声色変換した音声と合成して
-最終的な mp4 を書き出す。moviepy 1.x / 2.x の API 差は薄いラッパーで吸収する。
+「残す区間（Keep List）」に従って映像（または音声のみ）を切り出し、
+声色変換した音声と合成して最終ファイルを書き出す。
+moviepy 1.x / 2.x の API 差は薄いラッパーで吸収する。
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 from typing import Callable, Sequence
 
 from . import voice_changer
 
 Segment = tuple[float, float]
+
+# 拡張子だけで音声と判断できるもの
+AUDIO_EXTENSIONS = {
+    ".mp3", ".wav", ".m4a", ".m4b", ".aac", ".flac", ".ogg", ".oga",
+    ".opus", ".wma", ".aiff", ".aif", ".alac", ".caf",
+}
+
+# pydub の export に渡す候補（拡張子 -> [(format, codec), ...]）。
+# ffmpeg のビルドによって持っているエンコーダが違うので、前から順に試す。
+# 例えば Homebrew の ffmpeg には libvorbis が入っていないことがある。
+_EXPORT_FORMATS = {
+    ".m4a": [("ipod", "aac")],
+    ".mp4": [("ipod", "aac")],
+    ".aac": [("adts", "aac")],
+    ".mp3": [("mp3", None)],
+    ".wav": [("wav", None)],
+    ".flac": [("flac", None)],
+    ".ogg": [("ogg", "libvorbis"), ("ogg", "libopus")],
+    ".oga": [("ogg", "libvorbis"), ("ogg", "libopus")],
+    ".opus": [("opus", "libopus")],
+}
+
+# どの ffmpeg ビルドでも使える最後の逃げ道
+_FALLBACK_FORMAT = (".m4a", "ipod", "aac")
+
+
+def _ffmpeg_exe() -> str:
+    """moviepy が同梱する ffmpeg を優先し、無ければ PATH 上のものを使う。"""
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def is_audio_only(media_path: str) -> bool:
+    """映像トラックを持たないファイルかどうかを判定する。
+
+    まず拡張子で判断し、動画の拡張子でも映像が入っていない場合があるので
+    その場合だけ実際に開いて確かめる。
+    """
+    if os.path.splitext(media_path)[1].lower() in AUDIO_EXTENSIONS:
+        return True
+
+    from moviepy import VideoFileClip
+
+    try:
+        with VideoFileClip(media_path):
+            return False
+    except Exception:
+        return True
 
 
 # --------------------------------------------------------------------------
@@ -36,23 +90,45 @@ def _with_audio(clip, audio):
 # 音声抽出
 # --------------------------------------------------------------------------
 
-def extract_audio(video_path: str, output_wav: str, fps: int = 44100) -> str:
-    """動画から wav を抽出する。音声トラックが無ければ FileNotFoundError。"""
-    from moviepy import VideoFileClip
+def extract_audio(media_path: str, output_wav: str, fps: int = 44100) -> str:
+    """動画・音声のどちらからでも wav を抽出する。
 
+    moviepy を通すと音声のみのファイルで失敗するため、ffmpeg を直接呼ぶ。
+    """
     os.makedirs(os.path.dirname(os.path.abspath(output_wav)), exist_ok=True)
-    with VideoFileClip(video_path) as clip:
-        if clip.audio is None:
-            raise FileNotFoundError(f"音声トラックが見つかりません: {video_path}")
-        clip.audio.write_audiofile(output_wav, fps=fps, logger=None)
+
+    result = subprocess.run(
+        [
+            _ffmpeg_exe(), "-y", "-loglevel", "error",
+            "-i", media_path,
+            "-vn",                    # 映像は捨てる
+            "-acodec", "pcm_s16le",
+            "-ar", str(fps),
+            output_wav,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0 or not os.path.exists(output_wav):
+        raise FileNotFoundError(
+            f"音声を抽出できませんでした（音声トラックが無い可能性があります）: "
+            f"{os.path.basename(media_path)}\n{result.stderr.strip()[:300]}"
+        )
     return output_wav
 
 
-def get_duration(video_path: str) -> float:
-    """動画（または音声）の総再生時間を秒で返す。"""
+def get_duration(media_path: str) -> float:
+    """動画・音声の総再生時間を秒で返す。"""
+    if is_audio_only(media_path):
+        from moviepy import AudioFileClip
+
+        with AudioFileClip(media_path) as clip:
+            return float(clip.duration)
+
     from moviepy import VideoFileClip
 
-    with VideoFileClip(video_path) as clip:
+    with VideoFileClip(media_path) as clip:
         return float(clip.duration)
 
 
@@ -176,3 +252,125 @@ def process_video(
                 pass
         if temp_dir_obj is not None:
             temp_dir_obj.cleanup()
+
+
+# --------------------------------------------------------------------------
+# 音声のみの入力に対する処理
+# --------------------------------------------------------------------------
+
+def process_audio(
+    media_path: str,
+    keep_segments: Sequence[Segment],
+    output_path: str,
+    pitch_shift_semitones: float = 0.0,
+    pitch_method: str = "librosa",
+    converted_audio_path: str | None = None,
+    work_dir: str | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
+    bitrate: str = "192k",
+) -> str:
+    """音声のみの素材を Keep List に従ってカットし、声色変換して書き出す。
+
+    映像が無いので moviepy を通さず pydub だけで完結させる。
+    出力形式は output_path の拡張子から決まる（.m4a / .mp3 / .wav など）。
+    """
+    from pydub import AudioSegment
+
+    if not keep_segments:
+        raise ValueError("残す区間がありません。無音の閾値を緩めてください。")
+
+    def report(ratio: float, message: str) -> None:
+        if progress_callback:
+            progress_callback(ratio, message)
+
+    temp_dir_obj = None
+    if work_dir is None:
+        temp_dir_obj = tempfile.TemporaryDirectory(prefix="autocutter_")
+        work_dir = temp_dir_obj.name
+    os.makedirs(work_dir, exist_ok=True)
+
+    try:
+        # --- 元音声を wav に揃える -----------------------------------------
+        source_wav = converted_audio_path or os.path.join(work_dir, "source_audio.wav")
+        if converted_audio_path is None:
+            report(0.10, "音声を読み込み中...")
+            if not os.path.exists(source_wav):
+                extract_audio(media_path, source_wav)
+
+            # --- 声色変換 --------------------------------------------------
+            if pitch_shift_semitones:
+                report(0.30, "声色を変換中...")
+                source_wav = voice_changer.shift_pitch_file(
+                    source_wav,
+                    os.path.join(work_dir, "converted_audio.wav"),
+                    pitch_shift_semitones,
+                    method=pitch_method,
+                )
+
+        # --- カット & 結合 -------------------------------------------------
+        report(0.55, "カット区間を切り出し中...")
+        audio = AudioSegment.from_file(source_wav)
+        duration = len(audio) / 1000.0
+
+        result = AudioSegment.empty()
+        for start, end in keep_segments:
+            start = max(0.0, min(start, duration))
+            end = max(0.0, min(end, duration))
+            if end - start > 0.01:
+                result += audio[int(start * 1000):int(end * 1000)]
+
+        if len(result) == 0:
+            raise ValueError("切り出せる区間がありませんでした。")
+
+        # --- 書き出し ------------------------------------------------------
+        report(0.80, "書き出し中...")
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        ext = os.path.splitext(output_path)[1].lower()
+        output_path = _export_audio(result, output_path, ext, bitrate)
+
+        report(1.0, "完了")
+        return output_path
+
+    finally:
+        if temp_dir_obj is not None:
+            temp_dir_obj.cleanup()
+
+
+def supported_output_extension(input_path: str) -> str:
+    """入力に合わせた出力拡張子を返す。未対応の形式は m4a に寄せる。"""
+    ext = os.path.splitext(input_path)[1].lower()
+    return ext if ext in _EXPORT_FORMATS else ".m4a"
+
+
+def _export_audio(segment, output_path: str, ext: str, bitrate: str) -> str:
+    """候補の (format, codec) を順に試して書き出す。
+
+    どれも駄目なら m4a に切り替えて書き出し、実際に出力したパスを返す。
+    """
+    candidates = list(_EXPORT_FORMATS.get(ext, _EXPORT_FORMATS[".m4a"]))
+    fallback_ext, fallback_fmt, fallback_codec = _FALLBACK_FORMAT
+    if ext != fallback_ext:
+        candidates.append((fallback_fmt, fallback_codec))
+
+    last_error: Exception | None = None
+    for index, (fmt, codec) in enumerate(candidates):
+        # 最後の候補は拡張子ごと m4a に切り替える
+        is_fallback = index == len(candidates) - 1 and ext != fallback_ext
+        path = (
+            os.path.splitext(output_path)[0] + fallback_ext if is_fallback else output_path
+        )
+
+        params = {"format": fmt}
+        if codec:
+            params["codec"] = codec
+        if fmt != "wav":
+            params["bitrate"] = bitrate
+
+        try:
+            segment.export(path, **params)
+            return path
+        except Exception as e:  # エンコーダが無いビルドでは次の候補へ
+            last_error = e
+
+    raise RuntimeError(f"音声の書き出しに失敗しました: {last_error}")

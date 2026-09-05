@@ -4,9 +4,23 @@ __pycache__/
 venv/
 temp_files/
 output/
+# 素材ファイルは絶対にコミットしない（個人の録音が公開されるのを防ぐ）
 *.mp4
 *.mov
+*.mkv
+*.avi
+*.m4v
+*.mp3
+*.m4a
 *.wav
+*.flac
+*.ogg
+*.oga
+*.opus
+*.aac
+*.aiff
+*.aif
+*.wma
 *.srt
 *.ass
 .DS_Store

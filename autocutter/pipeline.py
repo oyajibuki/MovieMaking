@@ -54,6 +54,7 @@ class CutResult:
     subtitles: list[dict]
     whisper_result: dict | None = None
     output_video: str | None = None
+    is_audio_only: bool = False
 
     @property
     def new_duration(self) -> float:
@@ -77,13 +78,16 @@ class CutResult:
 
 
 def analyze(
-    video_path: str,
+    media_path: str,
     settings: CutSettings,
     work_dir: str,
     whisper_result: dict | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> CutResult:
-    """動画を解析し、カット区間・残す区間・補正済み字幕を算出する（書き出しはしない）。"""
+    """素材を解析し、カット区間・残す区間・補正済み字幕を算出する（書き出しはしない）。
+
+    media_path は動画でも音声のみ（mp3 / m4a / wav 等）でもよい。
+    """
 
     def report(ratio: float, message: str) -> None:
         if progress_callback:
@@ -95,9 +99,10 @@ def analyze(
     report(0.05, "音声を抽出中...")
     audio_path = os.path.join(work_dir, "source_audio.wav")
     if not os.path.exists(audio_path):
-        video_editor.extract_audio(video_path, audio_path)
+        video_editor.extract_audio(media_path, audio_path)
 
-    duration = video_editor.get_duration(video_path)
+    duration = video_editor.get_duration(media_path)
+    audio_only = video_editor.is_audio_only(media_path)
 
     # 2. 音声認識（既存 Whisper の結果を渡せば再解析しない）
     #    フィラー検知だけでなくテロップ出力にも使うため、常に実行する
@@ -147,18 +152,19 @@ def analyze(
         original_duration=duration,
         subtitles=subtitles,
         whisper_result=whisper_result,
+        is_audio_only=audio_only,
     )
 
 
 def render(
-    video_path: str,
+    media_path: str,
     result: CutResult,
     settings: CutSettings,
     output_path: str,
     work_dir: str,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> str:
-    """解析結果に従って動画を書き出す。"""
+    """解析結果に従って動画（または音声）を書き出す。"""
     converted_audio = None
     if settings.pitch_shift_semitones:
         if progress_callback:
@@ -170,25 +176,35 @@ def render(
             method=settings.pitch_method,
         )
 
-    result.output_video = video_editor.process_video(
-        video_path,
-        result.keep_segments,
-        output_path,
-        converted_audio_path=converted_audio,
-        work_dir=work_dir,
-        progress_callback=progress_callback,
-    )
+    if result.is_audio_only:
+        result.output_video = video_editor.process_audio(
+            media_path,
+            result.keep_segments,
+            output_path,
+            converted_audio_path=converted_audio,
+            work_dir=work_dir,
+            progress_callback=progress_callback,
+        )
+    else:
+        result.output_video = video_editor.process_video(
+            media_path,
+            result.keep_segments,
+            output_path,
+            converted_audio_path=converted_audio,
+            work_dir=work_dir,
+            progress_callback=progress_callback,
+        )
     return result.output_video
 
 
 def run(
-    video_path: str,
+    media_path: str,
     settings: CutSettings,
     output_path: str,
     work_dir: str,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> CutResult:
     """解析から書き出しまで一括で実行する。"""
-    result = analyze(video_path, settings, work_dir, progress_callback=progress_callback)
-    render(video_path, result, settings, output_path, work_dir, progress_callback)
+    result = analyze(media_path, settings, work_dir, progress_callback=progress_callback)
+    render(media_path, result, settings, output_path, work_dir, progress_callback)
     return result

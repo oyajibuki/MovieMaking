@@ -28,7 +28,7 @@ if getattr(sys, "frozen", False):
 else:
     os.environ["PATH"] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + os.environ["PATH"]
 
-from autocutter import audio_analyzer, pipeline, subtitle_utils  # noqa: E402
+from autocutter import audio_analyzer, pipeline, subtitle_utils, video_editor  # noqa: E402
 
 st.set_page_config(page_title="AutoCutter PRO", page_icon="✂️", layout="wide")
 
@@ -74,7 +74,10 @@ def reset_analysis():
 # --------------------------------------------------------------------------
 
 st.title("✂️ AutoCutter PRO")
-st.caption("無音・フィラーを自動カットし、声色を変えて書き出す動画編集ツール")
+st.caption(
+    "無音・フィラーを自動カットし、声色を変えて書き出す動画・音声編集ツール。"
+    "動画（mp4 / mov など）と音声のみ（mp3 / m4a / wav / flac / ogg など）に対応。"
+)
 
 with st.sidebar:
     st.header("⚙️ 処理設定")
@@ -133,19 +136,27 @@ with st.sidebar:
 # --------------------------------------------------------------------------
 
 uploaded_file = st.file_uploader(
-    "動画ファイルをアップロード", type=["mp4", "mov", "mkv", "avi", "m4v"],
+    "動画 / 音声ファイルをアップロード",
+    type=[
+        "mp4", "mov", "mkv", "avi", "m4v",
+        "mp3", "m4a", "wav", "flac", "ogg", "oga", "opus", "aac", "aiff", "wma",
+    ],
     on_change=reset_analysis,
 )
 
 if uploaded_file is None:
-    st.info("mp4 / mov などの動画をアップロードすると解析できます。")
+    st.info("動画（mp4 / mov など）または音声（mp3 / m4a / wav など）をアップロードすると解析できます。")
     st.stop()
 
-video_path = save_uploaded_file(uploaded_file)
+media_path = save_uploaded_file(uploaded_file)
+is_audio = video_editor.is_audio_only(media_path)
 
 col_video, col_action = st.columns([2, 1])
 with col_video:
-    st.video(video_path)
+    if is_audio:
+        st.audio(media_path)
+    else:
+        st.video(media_path)
 
 filler_words = [w.strip() for w in filler_text.replace("、", ",").split(",") if w.strip()]
 
@@ -173,7 +184,7 @@ with col_action:
 
         try:
             st.session_state["result"] = pipeline.analyze(
-                video_path, settings, get_work_dir(), progress_callback=on_progress
+                media_path, settings, get_work_dir(), progress_callback=on_progress
             )
             st.session_state.pop("output_video", None)
         except Exception as e:
@@ -251,15 +262,19 @@ st.header("🎬 2. 書き出し")
 if pitch_shift and pitch_method == "pydub":
     st.warning("簡易方式は音声の長さが変わるため映像とズレます。動画書き出しには「高品質」を選んでください。")
 
-if st.button("🎬 動画を書き出す", type="primary"):
+if st.button("🎬 動画 / 音声を書き出す", type="primary"):
     progress = st.progress(0.0, text="準備中...")
 
     def on_progress(ratio, message):
         progress.progress(min(1.0, ratio), text=message)
 
-    output_path = os.path.join(get_work_dir(), "autocutter_output.mp4")
+    ext = video_editor.supported_output_extension(media_path) if is_audio else ".mp4"
+    output_path = os.path.join(get_work_dir(), f"autocutter_output{ext}")
     try:
-        pipeline.render(video_path, result, settings, output_path, get_work_dir(), on_progress)
+        # 出力形式が書き出し時に変わることがあるので、実際のパスを受け取る
+        output_path = pipeline.render(
+            media_path, result, settings, output_path, get_work_dir(), on_progress
+        )
     except Exception as e:
         progress.empty()
         st.error(f"書き出しに失敗しました: {e}")
@@ -270,13 +285,16 @@ if st.button("🎬 動画を書き出す", type="primary"):
 
 if st.session_state.get("output_video"):
     output_path = st.session_state["output_video"]
-    st.video(output_path)
+    if is_audio:
+        st.audio(output_path)
+    else:
+        st.video(output_path)
     with open(output_path, "rb") as f:
         st.download_button(
-            "⬇️ 編集済み動画をダウンロード",
+            f"⬇️ 編集済み{'音声' if is_audio else '動画'}をダウンロード",
             data=f.read(),
-            file_name="autocutter_output.mp4",
-            mime="video/mp4",
+            file_name=os.path.basename(output_path),
+            mime="audio/mpeg" if is_audio else "video/mp4",
             use_container_width=True,
         )
 
