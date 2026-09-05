@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 from typing import Callable, Sequence
 
-from . import voice_changer
+from . import ffmpeg_tools, voice_changer
 
 Segment = tuple[float, float]
 
@@ -40,16 +40,6 @@ _EXPORT_FORMATS = {
 
 # どの ffmpeg ビルドでも使える最後の逃げ道
 _FALLBACK_FORMAT = (".m4a", "ipod", "aac")
-
-
-def _ffmpeg_exe() -> str:
-    """moviepy が同梱する ffmpeg を優先し、無ければ PATH 上のものを使う。"""
-    try:
-        import imageio_ffmpeg
-
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return "ffmpeg"
 
 
 def is_audio_only(media_path: str) -> bool:
@@ -99,7 +89,7 @@ def extract_audio(media_path: str, output_wav: str, fps: int = 44100) -> str:
 
     result = subprocess.run(
         [
-            _ffmpeg_exe(), "-y", "-loglevel", "error",
+            ffmpeg_tools.ffmpeg_exe(), "-y", "-loglevel", "error",
             "-i", media_path,
             "-vn",                    # 映像は捨てる
             "-acodec", "pcm_s16le",
@@ -141,6 +131,7 @@ def process_video(
     keep_segments: Sequence[Segment],
     output_path: str,
     pitch_shift_semitones: float = 0.0,
+    formant_ratio: float = 1.0,
     pitch_method: str = "librosa",
     converted_audio_path: str | None = None,
     work_dir: str | None = None,
@@ -186,16 +177,17 @@ def process_video(
 
         # --- 声色変換 -----------------------------------------------------
         audio_clip = None
-        if converted_audio_path is None and pitch_shift_semitones:
+        if converted_audio_path is None and (pitch_shift_semitones or formant_ratio != 1.0):
             report(0.15, "音声を抽出中...")
             src_wav = os.path.join(work_dir, "source_audio.wav")
             extract_audio(video_path, src_wav)
 
             report(0.30, "声色を変換中...")
-            converted_audio_path = voice_changer.shift_pitch_file(
+            converted_audio_path = voice_changer.convert_voice_file(
                 src_wav,
                 os.path.join(work_dir, "converted_audio.wav"),
-                pitch_shift_semitones,
+                semitones=pitch_shift_semitones,
+                formant_ratio=formant_ratio,
                 method=pitch_method,
             )
 
@@ -263,6 +255,7 @@ def process_audio(
     keep_segments: Sequence[Segment],
     output_path: str,
     pitch_shift_semitones: float = 0.0,
+    formant_ratio: float = 1.0,
     pitch_method: str = "librosa",
     converted_audio_path: str | None = None,
     work_dir: str | None = None,
@@ -275,6 +268,9 @@ def process_audio(
     出力形式は output_path の拡張子から決まる（.m4a / .mp3 / .wav など）。
     """
     from pydub import AudioSegment
+
+    # pydub は PATH 上の ffmpeg を探すので、moviepy と同じバイナリを使わせる
+    ffmpeg_tools.configure_pydub()
 
     if not keep_segments:
         raise ValueError("残す区間がありません。無音の閾値を緩めてください。")
@@ -298,12 +294,13 @@ def process_audio(
                 extract_audio(media_path, source_wav)
 
             # --- 声色変換 --------------------------------------------------
-            if pitch_shift_semitones:
+            if pitch_shift_semitones or formant_ratio != 1.0:
                 report(0.30, "声色を変換中...")
-                source_wav = voice_changer.shift_pitch_file(
+                source_wav = voice_changer.convert_voice_file(
                     source_wav,
                     os.path.join(work_dir, "converted_audio.wav"),
-                    pitch_shift_semitones,
+                    semitones=pitch_shift_semitones,
+                    formant_ratio=formant_ratio,
                     method=pitch_method,
                 )
 

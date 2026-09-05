@@ -1,10 +1,17 @@
 """
-voice_changer.py — 音声変換モジュール
+voice_changer.py — 声色変換モジュール
 
-身バレ防止のためのピッチシフト（声色変換）を行う。
+身バレ防止のために声の高さと声質を変える。
 
-2 方式を用意している:
-  - "librosa": 話速を保ったままピッチだけ変える（品質重視・既定）
+声の性別・年齢の印象を決めているのはピッチだけではなく **フォルマント**
+（声道の共鳴。体格に対応する）で、ピッチだけ動かすと早回しのような
+不自然な声になる。そこで 2 つを独立に操作する。
+
+  - ピッチ（半音）    : 声の高さ
+  - フォルマント倍率  : 1 より大きいと細い / 若い声、小さいと太い / 大人びた声
+
+処理方式:
+  - "librosa": 話速を保ったままピッチを変え、フォルマントを別途ワープする（既定）
   - "pydub"  : リサンプリングによる簡易変換。話速も変わるが依存が軽く高速
 """
 
@@ -14,6 +21,42 @@ import os
 
 # 実用上、これ以上動かすとケロケロ声になり聞き取れなくなる
 MAX_SEMITONES = 12.0
+
+# フォルマント倍率の実用範囲
+MIN_FORMANT = 0.70
+MAX_FORMANT = 1.45
+
+# 声色プリセット: 名前 -> (ピッチ半音, フォルマント倍率)
+# 一般的な成人男性の声を基準に調整している。元の声質によって効き方は変わるため、
+# UI 側で「変化の強さ」を掛けて微調整できるようにしている。
+VOICE_PRESETS: dict[str, tuple[float, float]] = {
+    "そのまま（変換しない）": (0.0, 1.00),
+    "女性の声": (5.0, 1.16),
+    "高めの女性の声": (7.0, 1.24),
+    "子供の声": (8.5, 1.34),
+    "太い男の声": (-4.0, 0.86),
+    "低い男の声": (-2.5, 0.92),
+    "年配の男性の声": (-3.5, 0.95),
+    "軽い匿名化（自然さ優先）": (2.0, 1.07),
+}
+
+DEFAULT_PRESET = "そのまま（変換しない）"
+
+
+def resolve_preset(name: str, strength: float = 1.0) -> tuple[float, float]:
+    """プリセット名と強さから (ピッチ半音, フォルマント倍率) を返す。
+
+    strength は変化量の倍率。1.0 が既定で、0 にすると無変換になる。
+    """
+    semitones, formant = VOICE_PRESETS.get(name, VOICE_PRESETS[DEFAULT_PRESET])
+
+    semitones *= strength
+    # フォルマントは 1.0 を中心に増減するので、1.0 からの差分に強さを掛ける
+    formant = 1.0 + (formant - 1.0) * strength
+
+    semitones = max(-MAX_SEMITONES, min(MAX_SEMITONES, semitones))
+    formant = max(MIN_FORMANT, min(MAX_FORMANT, formant))
+    return semitones, formant
 
 
 def semitones_to_octaves(semitones: float) -> float:
@@ -84,6 +127,138 @@ def shift_pitch_file(
     return _shift_with_pydub(input_path, output_path, semitones)
 
 
+def warp_formants(y, sr: int, ratio: float, n_fft: int = 2048, hop_length: int = 512,
+                  lifter: int = 30):
+    """スペクトル包絡（フォルマント）だけを周波数方向に ratio 倍する。
+
+    ピッチ（倍音の位置）は動かさず、共鳴のピーク位置だけをずらすので、
+    声の高さを変えずに「体格」の印象を変えられる。
+
+    ケプストラム法で包絡を取り出し、周波数軸を伸縮させた包絡との比を
+    元のスペクトルに掛けている。
+
+    Args:
+        y: モノラルの波形
+        sr: サンプリングレート
+        ratio: 1 より大きいと細い / 若い声、小さいと太い声
+        lifter: ケプストラムのどこまでを包絡とみなすか（大きいほど細かい形を拾う）
+    """
+    import librosa
+    import numpy as np
+
+    if ratio == 1.0 or len(y) < n_fft:
+        return y
+
+    spectrum = librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
+    magnitude = np.abs(spectrum)
+    phase = np.angle(spectrum)
+
+    n_bins = magnitude.shape[0]
+    log_magnitude = np.log(magnitude + 1e-10)
+
+    # --- ケプストラムの低ケフレンシー成分＝スペクトル包絡 ---
+    cepstrum = np.fft.irfft(log_magnitude, n=2 * (n_bins - 1), axis=0)
+    cepstrum[lifter:-lifter] = 0.0
+    envelope_log = np.fft.rfft(cepstrum, n=2 * (n_bins - 1), axis=0).real
+
+    # --- 包絡を周波数方向に伸縮する ---
+    bins = np.arange(n_bins)
+    source_bins = np.clip(bins / ratio, 0, n_bins - 1)
+    warped_log = np.empty_like(envelope_log)
+    for frame in range(envelope_log.shape[1]):
+        warped_log[:, frame] = np.interp(source_bins, bins, envelope_log[:, frame])
+
+    # --- 元の包絡を打ち消して、伸縮した包絡を掛け直す ---
+    gain = np.exp(np.clip(warped_log - envelope_log, -6.0, 6.0))
+    adjusted = magnitude * gain
+
+    result = librosa.istft(
+        adjusted * np.exp(1j * phase), hop_length=hop_length, length=len(y)
+    )
+    return result.astype(y.dtype, copy=False)
+
+
+def convert_voice_file(
+    input_path: str,
+    output_path: str,
+    semitones: float = 0.0,
+    formant_ratio: float = 1.0,
+    method: str = "librosa",
+) -> str:
+    """ピッチとフォルマントを指定して声色を変える。
+
+    librosa のピッチシフトはフォルマントも一緒に動かしてしまうため、
+    目標のフォルマント倍率になるよう差分だけを打ち消すワープを掛ける。
+
+    Args:
+        input_path: 入力音声（librosa 方式は wav 等 soundfile が読める形式）
+        output_path: 出力 wav パス
+        semitones: ピッチ変化量（半音）
+        formant_ratio: フォルマント倍率（1.0 で変えない）
+        method: "librosa"（話速維持・フォルマント対応）/ "pydub"（簡易）
+
+    Returns:
+        実際に書き出したパス。無変換のときは input_path をそのまま返す
+    """
+    semitones = max(-MAX_SEMITONES, min(MAX_SEMITONES, float(semitones)))
+    formant_ratio = max(MIN_FORMANT, min(MAX_FORMANT, float(formant_ratio)))
+
+    if semitones == 0 and formant_ratio == 1.0:
+        # 変換不要。呼び出し側の分岐を減らすため入力をそのまま返す
+        return input_path
+
+    if method == "librosa":
+        try:
+            return _convert_with_librosa(
+                input_path, output_path, semitones, formant_ratio
+            )
+        except ImportError:
+            method = "pydub"
+        except Exception as e:
+            if "Format not recognised" not in str(e):
+                raise
+            method = "pydub"
+
+    # pydub 方式はフォルマントを独立に扱えないのでピッチのみ
+    return _shift_with_pydub(input_path, output_path, semitones)
+
+
+def _convert_with_librosa(
+    input_path: str, output_path: str, semitones: float, formant_ratio: float
+) -> str:
+    import warnings
+
+    import librosa
+    import numpy as np
+    import soundfile as sf
+
+    y, sr = librosa.load(input_path, sr=None, mono=False)
+
+    # ピッチシフトはフォルマントも同じ倍率で動かすので、その分を差し引く
+    pitch_ratio = 2.0 ** (semitones / 12.0)
+    residual_ratio = formant_ratio / pitch_ratio if semitones else formant_ratio
+
+    def convert(channel):
+        if semitones:
+            channel = librosa.effects.pitch_shift(
+                y=channel, sr=sr, n_steps=semitones
+            )
+        if abs(residual_ratio - 1.0) > 1e-3:
+            channel = warp_formants(channel, sr, residual_ratio)
+        return channel
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if y.ndim == 1:
+            data = convert(y)
+        else:
+            data = list(zip(*[convert(ch) for ch in y]))
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    sf.write(output_path, data, sr)
+    return output_path
+
+
 def _shift_with_librosa(input_path: str, output_path: str, semitones: float) -> str:
     import warnings
 
@@ -112,6 +287,9 @@ def _shift_with_librosa(input_path: str, output_path: str, semitones: float) -> 
 def _shift_with_pydub(input_path: str, output_path: str, semitones: float) -> str:
     from pydub import AudioSegment
 
+    from . import ffmpeg_tools
+
+    ffmpeg_tools.configure_pydub()
     audio = AudioSegment.from_file(input_path)
     shifted = shift_pitch(audio, semitones_to_octaves(semitones))
 

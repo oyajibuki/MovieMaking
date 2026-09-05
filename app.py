@@ -38,7 +38,9 @@ IS_ZERO_GPU = HAS_SPACES and bool(os.environ.get("SPACE_ID"))
 
 import gradio as gr
 
-from autocutter import audio_analyzer, pipeline, subtitle_utils, transcriber, video_editor
+from autocutter import (
+    audio_analyzer, pipeline, subtitle_utils, transcriber, video_editor, voice_changer
+)
 
 
 LANGUAGES = {
@@ -61,6 +63,16 @@ def format_hms(seconds: float) -> str:
 
 def parse_fillers(text: str) -> list[str]:
     return [w.strip() for w in (text or "").replace("、", ",").split(",") if w.strip()]
+
+
+MANUAL_PRESET = "手動で調整する"
+
+
+def _resolve_voice(preset, strength, manual_pitch, manual_formant):
+    """プリセット（または手動指定）から (ピッチ半音, フォルマント倍率) を求める。"""
+    if preset == MANUAL_PRESET:
+        return float(manual_pitch), float(manual_formant)
+    return voice_changer.resolve_preset(preset, float(strength))
 
 
 @gpu_task
@@ -94,7 +106,10 @@ def analyze(
     remove_fillers,
     filler_text,
     margin_ms,
-    pitch,
+    voice_preset,
+    voice_strength,
+    manual_pitch,
+    manual_formant,
     model_size,
     language_label,
     progress=gr.Progress(),
@@ -102,6 +117,10 @@ def analyze(
     media_path = video_path or audio_path_in
     if not media_path:
         raise gr.Error("先に動画または音声ファイルをアップロードしてください。")
+
+    semitones, formant = _resolve_voice(
+        voice_preset, voice_strength, manual_pitch, manual_formant
+    )
 
     settings = pipeline.CutSettings(
         remove_silence=remove_silence,
@@ -112,7 +131,8 @@ def analyze(
         remove_fillers=remove_fillers,
         filler_words=parse_fillers(filler_text),
         margin=margin_ms / 1000.0,
-        pitch_shift_semitones=pitch,
+        pitch_shift_semitones=semitones,
+        formant_ratio=formant,
         model_size=model_size,
         language=LANGUAGES[language_label],
     )
@@ -321,16 +341,51 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
                     lines=3,
                 )
 
-            with gr.Accordion("🎚️ マージン / 🎤 声色変換", open=True):
+            with gr.Accordion("🎚️ マージン", open=True):
                 margin_ms = gr.Slider(
                     0, 500, value=80, step=10,
                     label="カット前後に残す余白（ミリ秒）",
                     info="ブツ切り感を防ぎます。大きくすると自然になりますが、カット量は減ります。",
                 )
-                pitch = gr.Slider(
+
+            with gr.Accordion("🎤 声色変換", open=True):
+                voice_preset = gr.Dropdown(
+                    list(voice_changer.VOICE_PRESETS.keys()) + [MANUAL_PRESET],
+                    value=voice_changer.DEFAULT_PRESET,
+                    label="声のタイプ",
+                    info="声の高さ（ピッチ）と声質（フォルマント）をまとめて変えます。",
+                )
+                voice_strength = gr.Slider(
+                    0.0, 1.5, value=1.0, step=0.05,
+                    label="変化の強さ",
+                    info="1.0 が既定。効きが弱いと感じたら上げ、不自然なら下げてください。",
+                )
+                manual_pitch = gr.Slider(
                     -12, 12, value=0, step=0.5,
                     label="ピッチ（半音）",
-                    info="+ で高く、- で低く。±3〜5 が身バレ防止と聞き取りやすさのバランス点です。",
+                    info="+ で高く、- で低く。声の高さそのもの。",
+                    visible=False,
+                )
+                manual_formant = gr.Slider(
+                    voice_changer.MIN_FORMANT, voice_changer.MAX_FORMANT,
+                    value=1.0, step=0.01,
+                    label="フォルマント倍率",
+                    info="1 より大きいと細い / 若い声、小さいと太い / 大人びた声になります。",
+                    visible=False,
+                )
+
+                def _toggle_voice_controls(preset):
+                    manual = preset == MANUAL_PRESET
+                    return (
+                        gr.update(visible=not manual),
+                        gr.update(visible=manual),
+                        gr.update(visible=manual),
+                    )
+
+                voice_preset.change(
+                    _toggle_voice_controls,
+                    inputs=[voice_preset],
+                    outputs=[voice_strength, manual_pitch, manual_formant],
                 )
 
             with gr.Accordion("🧠 音声認識", open=False):
@@ -380,7 +435,9 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
         inputs=[
             video_in, audio_in, remove_silence, auto_threshold, sensitivity_db,
             threshold_db, min_silence_len,
-            remove_fillers, filler_text, margin_ms, pitch, model_size, language_label,
+            remove_fillers, filler_text, margin_ms,
+            voice_preset, voice_strength, manual_pitch, manual_formant,
+            model_size, language_label,
         ],
         outputs=[stats_out, cuts_out, subs_out, state],
     )

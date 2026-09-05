@@ -226,14 +226,60 @@ class TestSubtitleOutput(unittest.TestCase):
 
 
 class TestVoiceChangerMath(unittest.TestCase):
+    def setUp(self):
+        from autocutter import voice_changer
+        self.vc = voice_changer
+
     def test_semitones_to_octaves(self):
-        from autocutter import voice_changer as vc
-        self.assertAlmostEqual(vc.semitones_to_octaves(12), 1.0)
-        self.assertAlmostEqual(vc.semitones_to_octaves(-6), -0.5)
+        self.assertAlmostEqual(self.vc.semitones_to_octaves(12), 1.0)
+        self.assertAlmostEqual(self.vc.semitones_to_octaves(-6), -0.5)
 
     def test_zero_shift_returns_input_path(self):
-        from autocutter import voice_changer as vc
-        self.assertEqual(vc.shift_pitch_file("in.wav", "out.wav", 0), "in.wav")
+        self.assertEqual(self.vc.shift_pitch_file("in.wav", "out.wav", 0), "in.wav")
+
+    def test_no_change_returns_input_path(self):
+        self.assertEqual(
+            self.vc.convert_voice_file("in.wav", "out.wav", 0.0, 1.0), "in.wav"
+        )
+
+
+class TestVoicePresets(unittest.TestCase):
+    def setUp(self):
+        from autocutter import voice_changer
+        self.vc = voice_changer
+
+    def test_default_preset_is_a_no_op(self):
+        self.assertEqual(self.vc.resolve_preset(self.vc.DEFAULT_PRESET), (0.0, 1.0))
+
+    def test_feminine_presets_raise_pitch_and_formant(self):
+        for name in ["女性の声", "高めの女性の声", "子供の声"]:
+            semitones, formant = self.vc.resolve_preset(name)
+            self.assertGreater(semitones, 0, name)
+            self.assertGreater(formant, 1.0, name)
+
+    def test_masculine_presets_lower_pitch_and_formant(self):
+        for name in ["太い男の声", "低い男の声"]:
+            semitones, formant = self.vc.resolve_preset(name)
+            self.assertLess(semitones, 0, name)
+            self.assertLess(formant, 1.0, name)
+
+    def test_strength_scales_both_axes(self):
+        full = self.vc.resolve_preset("女性の声", 1.0)
+        half = self.vc.resolve_preset("女性の声", 0.5)
+        self.assertAlmostEqual(half[0], full[0] / 2)
+        # フォルマントは 1.0 を中心に増減する
+        self.assertAlmostEqual(half[1] - 1.0, (full[1] - 1.0) / 2)
+
+    def test_zero_strength_disables_the_effect(self):
+        self.assertEqual(self.vc.resolve_preset("子供の声", 0.0), (0.0, 1.0))
+
+    def test_values_are_clamped_to_usable_range(self):
+        semitones, formant = self.vc.resolve_preset("子供の声", 10.0)
+        self.assertLessEqual(semitones, self.vc.MAX_SEMITONES)
+        self.assertLessEqual(formant, self.vc.MAX_FORMANT)
+
+    def test_unknown_preset_falls_back_to_no_op(self):
+        self.assertEqual(self.vc.resolve_preset("存在しない声"), (0.0, 1.0))
 
 
 class TestMediaTypeDetection(unittest.TestCase):

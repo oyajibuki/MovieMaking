@@ -28,7 +28,11 @@ if getattr(sys, "frozen", False):
 else:
     os.environ["PATH"] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + os.environ["PATH"]
 
-from autocutter import audio_analyzer, pipeline, subtitle_utils, video_editor  # noqa: E402
+from autocutter import (  # noqa: E402
+    audio_analyzer, pipeline, subtitle_utils, video_editor, voice_changer
+)
+
+MANUAL_PRESET = "手動で調整する"
 
 st.set_page_config(page_title="AutoCutter PRO", page_icon="✂️", layout="wide")
 
@@ -123,17 +127,27 @@ with st.sidebar:
     ) / 1000.0
 
     st.subheader("🎤 声色変換")
-    pitch_shift = st.slider(
-        "ピッチ（半音）", -12.0, 12.0, 0.0, 0.5,
-        help="+ で高く、- で低くなります。±3〜5 半音あたりが身バレ防止と聞き取りやすさのバランス点です。",
+    voice_preset = st.selectbox(
+        "声のタイプ",
+        list(voice_changer.VOICE_PRESETS.keys()) + [MANUAL_PRESET],
+        help="声の高さ（ピッチ）と声質（フォルマント）をまとめて変えます。",
     )
-    pitch_method = st.radio(
-        "変換方式",
-        ["librosa", "pydub"],
-        format_func=lambda m: "高品質（話速を維持）" if m == "librosa" else "簡易・高速（話速も変化）",
-        disabled=pitch_shift == 0,
-        help="動画に使う場合は「高品質」を選んでください。簡易方式は音声の長さが変わるため映像とズレます。",
-    )
+    if voice_preset == MANUAL_PRESET:
+        pitch_shift = st.slider("ピッチ（半音）", -12.0, 12.0, 0.0, 0.5)
+        formant_ratio = st.slider(
+            "フォルマント倍率",
+            voice_changer.MIN_FORMANT, voice_changer.MAX_FORMANT, 1.0, 0.01,
+            help="1 より大きいと細い / 若い声、小さいと太い / 大人びた声になります。",
+        )
+    else:
+        voice_strength = st.slider(
+            "変化の強さ", 0.0, 1.5, 1.0, 0.05,
+            help="1.0 が既定。効きが弱いと感じたら上げ、不自然なら下げてください。",
+        )
+        pitch_shift, formant_ratio = voice_changer.resolve_preset(
+            voice_preset, voice_strength
+        )
+        st.caption(f"ピッチ {pitch_shift:+.1f} 半音 / フォルマント {formant_ratio:.2f} 倍")
 
     st.divider()
     st.subheader("🧠 音声認識")
@@ -183,7 +197,7 @@ settings = pipeline.CutSettings(
     filler_words=filler_words,
     margin=margin,
     pitch_shift_semitones=pitch_shift,
-    pitch_method=pitch_method,
+    formant_ratio=formant_ratio,
     model_size=model_size,
     language=language,
 )
@@ -283,9 +297,6 @@ with col_ass:
 # --- 書き出し -------------------------------------------------------------
 st.divider()
 st.header("🎬 2. 書き出し")
-
-if pitch_shift and pitch_method == "pydub":
-    st.warning("簡易方式は音声の長さが変わるため映像とズレます。動画書き出しには「高品質」を選んでください。")
 
 if st.button("🎬 動画 / 音声を書き出す", type="primary"):
     progress = st.progress(0.0, text="準備中...")

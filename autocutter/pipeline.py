@@ -42,7 +42,12 @@ class CutSettings:
 
     # 声色変換
     pitch_shift_semitones: float = 0.0
+    formant_ratio: float = 1.0
     pitch_method: str = "librosa"
+
+    @property
+    def changes_voice(self) -> bool:
+        return bool(self.pitch_shift_semitones) or self.formant_ratio != 1.0
 
     # 音声認識
     model_size: str = "base"
@@ -192,13 +197,14 @@ def render(
 ) -> str:
     """解析結果に従って動画（または音声）を書き出す。"""
     converted_audio = None
-    if settings.pitch_shift_semitones:
+    if settings.changes_voice:
         if progress_callback:
             progress_callback(0.1, "声色を変換中...")
-        converted_audio = voice_changer.shift_pitch_file(
+        converted_audio = voice_changer.convert_voice_file(
             os.path.join(work_dir, "source_audio.wav"),
             os.path.join(work_dir, "converted_audio.wav"),
-            settings.pitch_shift_semitones,
+            semitones=settings.pitch_shift_semitones,
+            formant_ratio=settings.formant_ratio,
             method=settings.pitch_method,
         )
 

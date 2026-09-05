@@ -15,14 +15,15 @@ import os
 import sys
 import tempfile
 
-from autocutter import audio_analyzer, pipeline, video_editor
+from autocutter import audio_analyzer, pipeline, video_editor, voice_changer
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="無音・フィラーを自動カットし、声色を変換する（動画・音声どちらも可）"
     )
-    p.add_argument("input", help="入力ファイル（動画 または 音声）")
+    # --list-voices だけを単体で使えるように任意扱いにする
+    p.add_argument("input", nargs="?", help="入力ファイル（動画 または 音声）")
     p.add_argument(
         "-o", "--output",
         help="出力パス（既定: <入力名>_cut.<入力と同じ拡張子>）。"
@@ -46,8 +47,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fillers", help="カットする単語（カンマ区切り）")
 
     p.add_argument("--margin", type=float, default=0.08, help="カット前後に残す余白の秒数（既定 0.08）")
+    p.add_argument(
+        "--voice", default=None,
+        help="声色プリセット名（例: 女性の声 / 太い男の声 / 子供の声）。"
+             "--list-voices で一覧を表示",
+    )
+    p.add_argument(
+        "--voice-strength", type=float, default=1.0,
+        help="プリセットの変化の強さ（既定 1.0）",
+    )
     p.add_argument("--pitch", type=float, default=0.0, help="ピッチ変化量（半音、既定 0）")
-    p.add_argument("--pitch-method", choices=["librosa", "pydub"], default="librosa")
+    p.add_argument(
+        "--formant", type=float, default=1.0,
+        help="フォルマント倍率（既定 1.0）。1 より大きいと細い声、小さいと太い声",
+    )
+    p.add_argument("--list-voices", action="store_true", help="声色プリセットの一覧を表示して終了")
 
     p.add_argument("--model", default="base", help="Whisper モデル（既定 base）")
     p.add_argument("--language", default="ja", help="音声の言語（既定 ja）")
@@ -57,6 +71,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.list_voices:
+        print("利用できる声色プリセット:")
+        for name, (semitones, formant) in voice_changer.VOICE_PRESETS.items():
+            print(f"  {name:24s} ピッチ {semitones:+5.1f} 半音 / フォルマント {formant:.2f} 倍")
+        return 0
+
+    if not args.input:
+        build_parser().print_usage(sys.stderr)
+        print("入力ファイルを指定してください。", file=sys.stderr)
+        return 1
 
     if not os.path.exists(args.input):
         print(f"入力が見つかりません: {args.input}", file=sys.stderr)
@@ -77,6 +102,11 @@ def main(argv: list[str] | None = None) -> int:
         else list(audio_analyzer.DEFAULT_FILLER_WORDS_JA)
     )
 
+    if args.voice:
+        semitones, formant = voice_changer.resolve_preset(args.voice, args.voice_strength)
+    else:
+        semitones, formant = args.pitch, args.formant
+
     settings = pipeline.CutSettings(
         remove_silence=not args.no_silence,
         silence_threshold_db=args.threshold if args.threshold is not None else -38.0,
@@ -86,8 +116,8 @@ def main(argv: list[str] | None = None) -> int:
         remove_fillers=not args.no_filler,
         filler_words=fillers,
         margin=args.margin,
-        pitch_shift_semitones=args.pitch,
-        pitch_method=args.pitch_method,
+        pitch_shift_semitones=semitones,
+        formant_ratio=formant,
         model_size=args.model,
         language=args.language,
     )

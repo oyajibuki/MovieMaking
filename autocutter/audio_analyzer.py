@@ -78,6 +78,9 @@ def detect_silence(
     from pydub import AudioSegment
     from pydub.silence import detect_silence as _pydub_detect_silence
 
+    from . import ffmpeg_tools
+
+    ffmpeg_tools.configure_pydub()
     audio = AudioSegment.from_file(audio_path)
     threshold = resolve_threshold(audio, threshold_db, relative_offset_db)
 
@@ -94,6 +97,9 @@ def measure_loudness(audio_path: str) -> float:
     """素材の平均音量（dBFS）を返す。UI に実効閾値を表示するために使う。"""
     from pydub import AudioSegment
 
+    from . import ffmpeg_tools
+
+    ffmpeg_tools.configure_pydub()
     return AudioSegment.from_file(audio_path).dBFS
 
 
