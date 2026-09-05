@@ -1,284 +1,330 @@
 """
-AutoCutter PRO — 自動編集＆声色変換アプリ（Streamlit UI）
+AutoCutter PRO — 自動編集＆声色変換アプリ（Gradio UI / Hugging Face Spaces 用）
 
 無音カット・フィラーカット・声色変換を行い、ズレを補正したテロップ（SRT/ASS）も出力する。
-起動:  streamlit run app.py
+起動:  python app.py
+
+ローカルでは Streamlit 版（streamlit_app.py）も使える。UI が違うだけで中身は同じ。
 """
+
+from __future__ import annotations
 
 import os
 import shutil
-import sys
 import tempfile
 
-import streamlit as st
+# HF Spaces の ZeroGPU 上でだけ GPU を使う。
+# spaces は torch より先に import する必要があるため、他の import より前に置く。
+IS_ZERO_GPU = os.environ.get("SPACES_ZERO_GPU") == "true"
 
-# PyInstaller の --noconsole 時に stdout/stderr が None になる対策（04.subtitle と同じ）
-class DummyStream:
-    def write(self, *args, **kwargs): pass
-    def flush(self, *args, **kwargs): pass
+if IS_ZERO_GPU:
+    import spaces
 
-if sys.stdout is None:
-    sys.stdout = DummyStream()
-if sys.stderr is None:
-    sys.stderr = DummyStream()
-
-# 同梱 ffmpeg を優先的に見つけられるように PATH を通す
-if getattr(sys, "frozen", False):
-    os.environ["PATH"] = sys._MEIPASS + os.pathsep + os.environ["PATH"]
+    # 音声認識だけを GPU 区間にする（動画エンコードは CPU 側で回す）
+    gpu_task = spaces.GPU(duration=120)
 else:
-    os.environ["PATH"] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + os.environ["PATH"]
+    def gpu_task(fn):
+        return fn
 
-from autocutter import audio_analyzer, pipeline, subtitle_utils  # noqa: E402
+import gradio as gr
 
-st.set_page_config(page_title="AutoCutter PRO", page_icon="✂️", layout="wide")
+from autocutter import audio_analyzer, pipeline, subtitle_utils, transcriber, video_editor
+
+
+LANGUAGES = {
+    "日本語": "ja",
+    "English": "en",
+    "中文": "zh",
+    "한국어": "ko",
+    "Português": "pt",
+}
 
 
 # --------------------------------------------------------------------------
 # ユーティリティ
 # --------------------------------------------------------------------------
 
-def get_app_dir() -> str:
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def get_work_dir() -> str:
-    """このセッション専用の作業ディレクトリ。"""
-    if "work_dir" not in st.session_state:
-        st.session_state["work_dir"] = tempfile.mkdtemp(prefix="autocutter_", dir=None)
-    os.makedirs(st.session_state["work_dir"], exist_ok=True)
-    return st.session_state["work_dir"]
-
-
-def save_uploaded_file(uploaded_file) -> str:
-    work_dir = get_work_dir()
-    path = os.path.join(work_dir, uploaded_file.name)
-    with open(path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    return path
-
-
 def format_hms(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     return f"{int(seconds // 60):02d}:{seconds % 60:05.2f}"
 
 
-def reset_analysis():
-    for key in ("result", "output_video"):
-        st.session_state.pop(key, None)
+def parse_fillers(text: str) -> list[str]:
+    return [w.strip() for w in (text or "").replace("、", ",").split(",") if w.strip()]
 
 
-# --------------------------------------------------------------------------
-# サイドバー：処理設定
-# --------------------------------------------------------------------------
+@gpu_task
+def run_transcribe(audio_path: str, model_size: str, language: str) -> dict:
+    """音声認識だけを切り出した関数。ZeroGPU ではここだけが GPU を掴む。
 
-st.title("✂️ AutoCutter PRO")
-st.caption("無音・フィラーを自動カットし、声色を変えて書き出す動画編集ツール")
-
-with st.sidebar:
-    st.header("⚙️ 処理設定")
-
-    st.subheader("🔇 無音カット")
-    remove_silence = st.checkbox("無音区間をカットする", value=True)
-    silence_threshold_db = st.slider(
-        "無音とみなす音量（dBFS）", -60.0, -10.0, -38.0, 1.0,
-        help="小さい値ほど「本当に静か」な部分だけを切ります。切りすぎるときは下げてください。",
-        disabled=not remove_silence,
-    )
-    min_silence_len = st.slider(
-        "無音とみなす最短の長さ（秒）", 0.1, 3.0, 0.5, 0.1,
-        disabled=not remove_silence,
-    )
-
-    st.subheader("🗣️ フィラーカット")
-    remove_fillers = st.checkbox("フィラー（えー・あのー等）をカットする", value=True)
-    filler_text = st.text_area(
-        "カットする単語（カンマ区切り）",
-        value="、".join(audio_analyzer.DEFAULT_FILLER_WORDS_JA),
-        height=100,
-        disabled=not remove_fillers,
-    )
-
-    st.subheader("🎚️ マージン")
-    margin = st.slider(
-        "カット前後に残す余白（ミリ秒）", 0, 500, 80, 10,
-        help="ブツ切り感を防ぎます。大きくすると自然になりますが、カット量は減ります。",
-    ) / 1000.0
-
-    st.subheader("🎤 声色変換")
-    pitch_shift = st.slider(
-        "ピッチ（半音）", -12.0, 12.0, 0.0, 0.5,
-        help="+ で高く、- で低くなります。±3〜5 半音あたりが身バレ防止と聞き取りやすさのバランス点です。",
-    )
-    pitch_method = st.radio(
-        "変換方式",
-        ["librosa", "pydub"],
-        format_func=lambda m: "高品質（話速を維持）" if m == "librosa" else "簡易・高速（話速も変化）",
-        disabled=pitch_shift == 0,
-        help="動画に使う場合は「高品質」を選んでください。簡易方式は音声の長さが変わるため映像とズレます。",
-    )
-
-    st.divider()
-    st.subheader("🧠 音声認識")
-    model_size = st.selectbox("モデル", ["tiny", "base", "small", "medium"], index=1)
-    language = st.selectbox(
-        "言語", ["ja", "en", "zh", "ko", "pt"], index=0,
-        format_func=lambda c: {"ja": "日本語", "en": "English", "zh": "中文", "ko": "한국어", "pt": "Português"}[c],
+    ZeroGPU は呼び出しごとに GPU を割り当て直すため、モデルをプロセス内に
+    キャッシュして使い回すと 2 回目以降に壊れる。そこでキャッシュを切る。
+    """
+    return transcriber.transcribe(
+        audio_path,
+        model_size=model_size,
+        language=language,
+        word_timestamps=True,
+        cache_model=not IS_ZERO_GPU,
     )
 
 
 # --------------------------------------------------------------------------
-# メイン：アップロード → 解析 → 書き出し
+# 解析
 # --------------------------------------------------------------------------
 
-uploaded_file = st.file_uploader(
-    "動画ファイルをアップロード", type=["mp4", "mov", "mkv", "avi", "m4v"],
-    on_change=reset_analysis,
-)
+def analyze(
+    video_path,
+    remove_silence,
+    threshold_db,
+    min_silence_len,
+    remove_fillers,
+    filler_text,
+    margin_ms,
+    pitch,
+    model_size,
+    language_label,
+    progress=gr.Progress(),
+):
+    if not video_path:
+        raise gr.Error("先に動画をアップロードしてください。")
 
-if uploaded_file is None:
-    st.info("mp4 / mov などの動画をアップロードすると解析できます。")
-    st.stop()
-
-video_path = save_uploaded_file(uploaded_file)
-
-col_video, col_action = st.columns([2, 1])
-with col_video:
-    st.video(video_path)
-
-filler_words = [w.strip() for w in filler_text.replace("、", ",").split(",") if w.strip()]
-
-settings = pipeline.CutSettings(
-    remove_silence=remove_silence,
-    silence_threshold_db=silence_threshold_db,
-    min_silence_len=min_silence_len,
-    remove_fillers=remove_fillers,
-    filler_words=filler_words,
-    margin=margin,
-    pitch_shift_semitones=pitch_shift,
-    pitch_method=pitch_method,
-    model_size=model_size,
-    language=language,
-)
-
-with col_action:
-    st.markdown("### 1. 解析")
-    st.caption("音声認識 → 無音・フィラー検出 → カットリスト作成")
-    if st.button("🔍 解析する", type="primary", use_container_width=True):
-        progress = st.progress(0.0, text="準備中...")
-
-        def on_progress(ratio, message):
-            progress.progress(min(1.0, ratio), text=message)
-
-        try:
-            st.session_state["result"] = pipeline.analyze(
-                video_path, settings, get_work_dir(), progress_callback=on_progress
-            )
-            st.session_state.pop("output_video", None)
-        except Exception as e:
-            progress.empty()
-            st.error(f"解析に失敗しました: {e}")
-        else:
-            progress.empty()
-            st.success("解析完了")
-
-result = st.session_state.get("result")
-if result is None:
-    st.stop()
-
-# --- 解析サマリ -----------------------------------------------------------
-st.divider()
-st.header("📊 解析結果")
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("元の長さ", format_hms(result.original_duration))
-c2.metric("編集後", format_hms(result.new_duration))
-c3.metric("カット量", format_hms(result.removed_duration), f"-{result.removed_ratio * 100:.1f}%")
-c4.metric("カット箇所", f"{len(result.silence_cuts) + len(result.filler_cuts)} 箇所")
-
-with st.expander(f"🔇 無音カット {len(result.silence_cuts)} 箇所 / 🗣️ フィラーカット {len(result.filler_cuts)} 箇所"):
-    tab_silence, tab_filler = st.tabs(["無音", "フィラー"])
-    with tab_silence:
-        st.dataframe(
-            [{"開始": format_hms(s), "終了": format_hms(e), "長さ(秒)": round(e - s, 2)}
-             for s, e in result.silence_cuts],
-            use_container_width=True,
-        )
-    with tab_filler:
-        st.dataframe(
-            [{"開始": format_hms(s), "終了": format_hms(e), "長さ(秒)": round(e - s, 2)}
-             for s, e in result.filler_cuts],
-            use_container_width=True,
-        )
-
-# --- テロップ編集 ---------------------------------------------------------
-st.subheader("📝 テロップ（カット後のタイミングに補正済み）")
-edited = st.data_editor(
-    result.subtitles,
-    column_config={
-        "start": st.column_config.NumberColumn("開始(秒)", format="%.2f"),
-        "end": st.column_config.NumberColumn("終了(秒)", format="%.2f"),
-        "text": st.column_config.TextColumn("テキスト", width="large"),
-    },
-    num_rows="dynamic",
-    use_container_width=True,
-    key="subtitle_editor",
-)
-
-col_srt, col_ass = st.columns(2)
-with col_srt:
-    st.download_button(
-        "⬇️ SRT をダウンロード",
-        data=subtitle_utils.create_srt_content(edited),
-        file_name="autocutter.srt",
-        mime="text/plain",
-        use_container_width=True,
-    )
-with col_ass:
-    st.download_button(
-        "⬇️ ASS をダウンロード",
-        data=subtitle_utils.create_ass_content(edited),
-        file_name="autocutter.ass",
-        mime="text/plain",
-        use_container_width=True,
+    settings = pipeline.CutSettings(
+        remove_silence=remove_silence,
+        silence_threshold_db=threshold_db,
+        min_silence_len=min_silence_len,
+        remove_fillers=remove_fillers,
+        filler_words=parse_fillers(filler_text),
+        margin=margin_ms / 1000.0,
+        pitch_shift_semitones=pitch,
+        model_size=model_size,
+        language=LANGUAGES[language_label],
     )
 
-# --- 書き出し -------------------------------------------------------------
-st.divider()
-st.header("🎬 2. 書き出し")
+    work_dir = tempfile.mkdtemp(prefix="autocutter_")
 
-if pitch_shift and pitch_method == "pydub":
-    st.warning("簡易方式は音声の長さが変わるため映像とズレます。動画書き出しには「高品質」を選んでください。")
-
-if st.button("🎬 動画を書き出す", type="primary"):
-    progress = st.progress(0.0, text="準備中...")
-
-    def on_progress(ratio, message):
-        progress.progress(min(1.0, ratio), text=message)
-
-    output_path = os.path.join(get_work_dir(), "autocutter_output.mp4")
     try:
-        pipeline.render(video_path, result, settings, output_path, get_work_dir(), on_progress)
-    except Exception as e:
-        progress.empty()
-        st.error(f"書き出しに失敗しました: {e}")
-    else:
-        progress.empty()
-        st.session_state["output_video"] = output_path
-        st.success("書き出し完了")
+        # 1. 音声抽出（この wav は後段の解析・声色変換で使い回す）
+        progress(0.05, desc="音声を抽出中...")
+        audio_path = os.path.join(work_dir, "source_audio.wav")
+        video_editor.extract_audio(video_path, audio_path)
 
-if st.session_state.get("output_video"):
-    output_path = st.session_state["output_video"]
-    st.video(output_path)
-    with open(output_path, "rb") as f:
-        st.download_button(
-            "⬇️ 編集済み動画をダウンロード",
-            data=f.read(),
-            file_name="autocutter_output.mp4",
-            mime="video/mp4",
-            use_container_width=True,
+        # 2. 音声認識（ZeroGPU ではここだけ GPU）
+        progress(0.20, desc=f"音声認識中...（model={model_size}）")
+        whisper_result = run_transcribe(audio_path, model_size, settings.language)
+
+        # 3. カット区間の算出と字幕リマップ
+        progress(0.70, desc="カット区間を算出中...")
+        result = pipeline.analyze(
+            video_path, settings, work_dir, whisper_result=whisper_result
+        )
+    except Exception as e:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise gr.Error(f"解析に失敗しました: {e}") from e
+
+    stats = (
+        f"### 解析結果\n"
+        f"| 項目 | 値 |\n|---|---|\n"
+        f"| 元の長さ | {format_hms(result.original_duration)} |\n"
+        f"| 編集後 | {format_hms(result.new_duration)} |\n"
+        f"| カット量 | {format_hms(result.removed_duration)} "
+        f"（{result.removed_ratio * 100:.1f}%） |\n"
+        f"| 無音カット | {len(result.silence_cuts)} 箇所 |\n"
+        f"| フィラーカット | {len(result.filler_cuts)} 箇所 |\n"
+    )
+
+    cuts = [
+        [kind, format_hms(s), format_hms(e), round(e - s, 2)]
+        for kind, segs in (("無音", result.silence_cuts), ("フィラー", result.filler_cuts))
+        for s, e in segs
+    ]
+    cuts.sort(key=lambda row: row[1])
+
+    subs = [[round(s["start"], 2), round(s["end"], 2), s["text"]] for s in result.subtitles]
+
+    state = {
+        "video_path": video_path,
+        "work_dir": work_dir,
+        "result": result,
+        "settings": settings,
+    }
+    return stats, cuts, subs, state
+
+
+# --------------------------------------------------------------------------
+# 書き出し
+# --------------------------------------------------------------------------
+
+def _rows_to_segments(rows) -> list[dict]:
+    """Dataframe の中身（DataFrame でも list でも）を字幕 dict のリストにする。"""
+    if rows is None:
+        return []
+    if hasattr(rows, "values"):
+        rows = rows.values.tolist()
+
+    segments = []
+    for row in rows:
+        if row is None or len(row) < 3:
+            continue
+        start, end, text = row[0], row[1], row[2]
+        if start is None or end is None or not str(text).strip():
+            continue
+        segments.append({"start": float(start), "end": float(end), "text": str(text)})
+    return segments
+
+
+def export_subtitles(state, sub_rows):
+    if not state:
+        raise gr.Error("先に解析を実行してください。")
+
+    segments = _rows_to_segments(sub_rows)
+    if not segments:
+        raise gr.Error(
+            "書き出せるテロップがありません。"
+            "音声が認識されなかった可能性があります（言語設定を確認してください）。"
         )
 
-st.divider()
-st.caption("AutoCutter PRO — 無音・フィラー自動カット / 声色変換 / テロップ生成")
+    work_dir = state["work_dir"]
+    srt_path = os.path.join(work_dir, "autocutter.srt")
+    ass_path = os.path.join(work_dir, "autocutter.ass")
+
+    with open(srt_path, "w", encoding="utf-8") as f:
+        f.write(subtitle_utils.create_srt_content(segments))
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(subtitle_utils.create_ass_content(segments))
+
+    return [srt_path, ass_path]
+
+
+def render_video(state, progress=gr.Progress()):
+    if not state:
+        raise gr.Error("先に解析を実行してください。")
+
+    result = state["result"]
+    settings = state["settings"]
+    work_dir = state["work_dir"]
+    output_path = os.path.join(work_dir, "autocutter_output.mp4")
+
+    def report(ratio, message):
+        progress(ratio, desc=message)
+
+    try:
+        pipeline.render(
+            state["video_path"], result, settings, output_path, work_dir, report
+        )
+    except Exception as e:
+        raise gr.Error(f"書き出しに失敗しました: {e}") from e
+
+    return output_path
+
+
+# --------------------------------------------------------------------------
+# UI
+# --------------------------------------------------------------------------
+
+with gr.Blocks(title="AutoCutter PRO") as demo:
+    state = gr.State()
+
+    gr.Markdown(
+        "# ✂️ AutoCutter PRO\n"
+        "無音・フィラーを自動カットし、声色を変えて書き出す動画編集ツール。"
+        "カット後のタイミングに補正したテロップ（SRT / ASS）も出力します。"
+    )
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            video_in = gr.Video(label="動画をアップロード", sources=["upload"])
+
+            with gr.Accordion("🔇 無音カット", open=True):
+                remove_silence = gr.Checkbox(label="無音区間をカットする", value=True)
+                threshold_db = gr.Slider(
+                    -60, -10, value=-38, step=1,
+                    label="無音とみなす音量（dBFS）",
+                    info="小さい値ほど「本当に静か」な部分だけを切ります。切りすぎるときは下げてください。",
+                )
+                min_silence_len = gr.Slider(
+                    0.1, 3.0, value=0.5, step=0.1, label="無音とみなす最短の長さ（秒）"
+                )
+
+            with gr.Accordion("🗣️ フィラーカット", open=True):
+                remove_fillers = gr.Checkbox(
+                    label="フィラー（えー・あのー等）をカットする", value=True
+                )
+                filler_text = gr.Textbox(
+                    label="カットする単語（カンマ区切り）",
+                    value="、".join(audio_analyzer.DEFAULT_FILLER_WORDS_JA),
+                    lines=3,
+                )
+
+            with gr.Accordion("🎚️ マージン / 🎤 声色変換", open=True):
+                margin_ms = gr.Slider(
+                    0, 500, value=80, step=10,
+                    label="カット前後に残す余白（ミリ秒）",
+                    info="ブツ切り感を防ぎます。大きくすると自然になりますが、カット量は減ります。",
+                )
+                pitch = gr.Slider(
+                    -12, 12, value=0, step=0.5,
+                    label="ピッチ（半音）",
+                    info="+ で高く、- で低く。±3〜5 が身バレ防止と聞き取りやすさのバランス点です。",
+                )
+
+            with gr.Accordion("🧠 音声認識", open=False):
+                model_size = gr.Dropdown(
+                    ["tiny", "base", "small", "medium"], value="base", label="モデル",
+                    info="大きいほど精度は上がりますが遅くなります。",
+                )
+                language_label = gr.Dropdown(
+                    list(LANGUAGES.keys()), value="日本語", label="言語"
+                )
+
+            analyze_btn = gr.Button("🔍 解析する", variant="primary")
+
+        with gr.Column(scale=1):
+            stats_out = gr.Markdown("動画をアップロードして「解析する」を押してください。")
+
+            cuts_out = gr.Dataframe(
+                headers=["種別", "開始", "終了", "長さ(秒)"],
+                label="カット箇所",
+                interactive=False,
+                wrap=True,
+            )
+
+            subs_out = gr.Dataframe(
+                headers=["開始(秒)", "終了(秒)", "テキスト"],
+                label="テロップ（カット後のタイミングに補正済み・編集可）",
+                interactive=True,
+                wrap=True,
+            )
+
+            with gr.Row():
+                srt_btn = gr.Button("📝 テロップを書き出す")
+                render_btn = gr.Button("🎬 動画を書き出す", variant="primary")
+
+            subs_files = gr.File(label="SRT / ASS", file_count="multiple")
+            video_out = gr.Video(label="編集済み動画")
+
+    gr.Markdown(
+        "---\n"
+        "**注意**: ストレージは揮発性です。書き出した動画・テロップは必ずダウンロードしてください。\n"
+        "無料枠は CPU 2 コアのため、モデルは `tiny` / `base`、動画は 10 分程度までを推奨します。"
+    )
+
+    analyze_btn.click(
+        analyze,
+        inputs=[
+            video_in, remove_silence, threshold_db, min_silence_len,
+            remove_fillers, filler_text, margin_ms, pitch, model_size, language_label,
+        ],
+        outputs=[stats_out, cuts_out, subs_out, state],
+    )
+    srt_btn.click(export_subtitles, inputs=[state, subs_out], outputs=[subs_files])
+    render_btn.click(render_video, inputs=[state], outputs=[video_out])
+
+
+if __name__ == "__main__":
+    # Gradio 6 では theme は launch() 側で指定する
+    demo.queue().launch(
+        theme=gr.themes.Soft(),
+        server_name="0.0.0.0",
+        server_port=int(os.environ.get("PORT", 7860)),
+    )

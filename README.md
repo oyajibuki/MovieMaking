@@ -3,8 +3,8 @@ title: AutoCutter PRO
 emoji: ✂️
 colorFrom: indigo
 colorTo: purple
-sdk: docker
-app_port: 7860
+sdk: gradio
+app_file: app.py
 pinned: false
 short_description: 無音・フィラーを自動カットし、声色を変換する動画編集ツール
 ---
@@ -41,14 +41,22 @@ brew install ffmpeg python@3.12
 
 ## 使い方
 
-### GUI（Streamlit）
+### GUI（Gradio / Hugging Face Spaces と同じもの）
 
 ```bash
-./.venv/bin/streamlit run app.py
+./.venv/bin/python app.py
 ```
 
-動画をアップロード →「解析する」でカット箇所とテロップを確認 →「動画を書き出す」。
-テロップは書き出し前に表内で直接編集できる。
+http://localhost:7860 が開く。動画をアップロード →「解析する」でカット箇所とテロップを確認
+→「動画を書き出す」。テロップは書き出し前に表内で直接編集できる。
+
+### GUI（Streamlit / ローカル専用）
+
+```bash
+./.venv/bin/streamlit run streamlit_app.py
+```
+
+同じ処理を Streamlit の UI で操作するもの。中身は `autocutter/` を共有しているので挙動は同じ。
 
 ### CLI
 
@@ -76,14 +84,21 @@ brew install ffmpeg python@3.12
 
 ## Web で使う（Hugging Face Spaces）
 
-ブラウザ上で動画をアップロードして編集できるように、Docker SDK の Space としてデプロイする。
+ブラウザ上で動画をアップロードして編集できるように、**Gradio SDK** の Space としてデプロイする。
 `main` に push すると GitHub Actions が Space へ自動同期する（04.subtitle と同じ仕組み）。
+
+> **なぜ Docker SDK ではないのか**
+> 2026 年 7 月頃の方針変更で、**Docker Space は有料プラン（PRO / 月 $9）専用**になった。
+> 無料アカウントで作れるのは Gradio SDK の Space なので、UI を Gradio で用意している。
+> 既存の Docker Space（04.subtitle の `ai-subtitle` など）は変更前のものがそのまま残る。
+> リポジトリの `Dockerfile` は、自前サーバーや PRO で Docker として動かしたいとき用に残してある。
 
 ### 初回だけ必要な設定
 
 1. **Space を作る** — https://huggingface.co/new-space
    - Owner: `AutoCraft502` / Space name: `autocutter-pro`
-   - SDK: **Docker**（Blank template）
+   - SDK: **Gradio**（Blank template）
+   - Hardware: 無料枠（CPU Basic か ZeroGPU）
    - 別の名前にする場合は、GitHub リポジトリの Settings → Secrets and variables → Actions → Variables に
      `HF_USER` / `HF_SPACE` を登録すれば、ワークフローがそちらを見る。
 
@@ -100,16 +115,23 @@ brew install ffmpeg python@3.12
 
 | ファイル | 役割 |
 |---|---|
-| `Dockerfile` | Python 3.12 + ffmpeg。CPU 版 torch と Whisper base モデルを焼き込む |
-| `.streamlit/config.toml` | アップロード上限 1000MB、ダークテーマ |
+| `README.md` の frontmatter | `sdk: gradio` / `app_file: app.py` を Space に伝える |
+| `packages.txt` | Space に ffmpeg を入れる（moviepy・pydub・whisper が必要とする） |
+| `requirements.txt` | Python 依存。Space はこれを見て環境を作る |
 | `.github/workflows/sync_to_huggingface.yml` | main への push で Space へ同期 |
+| `Dockerfile` | Space では未使用。自前ホスティング / PRO の Docker Space 用 |
+
+### ZeroGPU について
+
+Hardware に **ZeroGPU** を選ぶと、音声認識だけが GPU で動くようになっている
+（`SPACES_ZERO_GPU` 環境変数で自動判定。動画エンコードは CPU のまま）。
+ZeroGPU は呼び出しごとに GPU を割り当て直すため、その場合だけ Whisper モデルの
+プロセス内キャッシュを切っている。CPU Basic を選んだ場合は全て CPU で動く。
 
 ### 無料枠での制約
 
-HF Spaces の無料枠は **CPU 2 コア / メモリ 16GB**。GPU は無い。
-
-- Whisper は CPU 実行になるため、`medium` 以上は実用的でない。**`tiny` か `base`** を選ぶこと
-- 動画のエンコードも CPU なので、**10 分程度までの動画**を想定
+- Whisper は CPU 実行だと重いので、CPU Basic なら **`tiny` か `base`** を選ぶこと
+- 動画のエンコードは常に CPU なので、**10 分程度までの動画**を想定
 - Space はアクセスが無いとスリープし、次回起動に時間がかかる
 - ストレージは揮発性。アップロードした動画も書き出した動画も再起動で消えるため、
   **書き出した動画は必ずダウンロードすること**
@@ -125,7 +147,8 @@ autocutter/
 ├── transcriber.py      Whisper ラッパー（openai-whisper / faster-whisper）
 ├── subtitle_utils.py   SRT / ASS 出力（04.subtitle から流用）
 └── pipeline.py         上記を設計書のフロー順に繋ぐオーケストレータ
-app.py                  Streamlit UI
+app.py                  Gradio UI（Hugging Face Spaces のエントリポイント）
+streamlit_app.py        Streamlit UI（ローカル用）
 cli.py                  コマンドライン版
 tests/                  区間演算・字幕リマップの単体テスト
 ```

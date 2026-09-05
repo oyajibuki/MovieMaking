@@ -1,10 +1,15 @@
 # AutoCutter PRO
-# Python 3.10 - 3.12 を推奨（openai-whisper / torch が 3.13+ に未対応のため）
+# ローカル実行は Python 3.10 - 3.12 を推奨（openai-whisper / torch が 3.13+ に未対応）
 
-streamlit>=1.31
+# UI（Hugging Face Spaces は Gradio SDK で動かす）
+gradio==6.26.0
+# ZeroGPU 用。ZeroGPU 以外の環境では import されないので入っていても影響しない
+spaces
+
+# 動画・音声処理
 moviepy>=2.0
 pydub>=0.25.1
-numpy>=1.26,<2.2
+numpy>=1.26
 
 # 音声認識（04.subtitle と同じ openai-whisper。faster-whisper に差し替えても動く）
 openai-whisper
@@ -12,3 +17,6 @@ openai-whisper
 # 声色変換（話速を維持したピッチシフト用）
 librosa>=0.10
 soundfile>=0.12
+
+# ローカルの Streamlit 版 UI（streamlit_app.py）用。Space では未使用
+streamlit>=1.31

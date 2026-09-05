@@ -13,13 +13,17 @@ MODEL_SIZES = ["tiny", "base", "small", "medium", "large"]
 _model_cache: dict[tuple[str, str], object] = {}
 
 
-def load_model(model_size: str = "base", backend: str = "auto"):
-    """Whisper モデルを読み込む（プロセス内でキャッシュする）。"""
+def load_model(model_size: str = "base", backend: str = "auto", cache: bool = True):
+    """Whisper モデルを読み込む（既定ではプロセス内でキャッシュする）。
+
+    ZeroGPU のように GPU が呼び出しごとに割り当て直される環境では、
+    前回の割り当てに紐づいたモデルを使い回せないため cache=False を指定する。
+    """
     if backend == "auto":
         backend = "faster" if _has_faster_whisper() else "openai"
 
     key = (backend, model_size)
-    if key in _model_cache:
+    if cache and key in _model_cache:
         return _model_cache[key]
 
     if backend == "faster":
@@ -31,7 +35,8 @@ def load_model(model_size: str = "base", backend: str = "auto"):
 
         model = whisper.load_model(model_size)
 
-    _model_cache[key] = model
+    if cache:
+        _model_cache[key] = model
     return model
 
 
@@ -50,6 +55,7 @@ def transcribe(
     language: str = "ja",
     word_timestamps: bool = True,
     backend: str = "auto",
+    cache_model: bool = True,
 ) -> dict:
     """音声認識を実行し、Whisper 互換の {"segments": [...], "text": str} を返す。
 
@@ -57,7 +63,7 @@ def transcribe(
     words（start / end / word）も含む。この形は既存アプリの出力と互換。
     """
     if model is None:
-        model = load_model(model_size, backend=backend)
+        model = load_model(model_size, backend=backend, cache=cache_model)
 
     if _is_faster_whisper(model):
         return _transcribe_faster(model, media_path, language, word_timestamps)
