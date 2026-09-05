@@ -13,18 +13,28 @@ import os
 import shutil
 import tempfile
 
-# HF Spaces の ZeroGPU 上でだけ GPU を使う。
+# ZeroGPU（HF Spaces）で音声認識を GPU に載せるためのデコレータ。
 # spaces は torch より先に import する必要があるため、他の import より前に置く。
-IS_ZERO_GPU = os.environ.get("SPACES_ZERO_GPU") == "true"
-
-if IS_ZERO_GPU:
+#
+# ZeroGPU は起動時に @spaces.GPU 付きの関数をスキャンし、1 つも無いと
+# 「No @spaces.GPU function detected during startup」で起動に失敗する。
+# 環境変数で条件分岐するとこの検出に引っかかるため、常に適用する。
+# 公式ドキュメント曰く、このデコレータは ZeroGPU 以外の環境では効果を持たない。
+try:
     import spaces
 
     # 音声認識だけを GPU 区間にする（動画エンコードは CPU 側で回す）
     gpu_task = spaces.GPU(duration=120)
-else:
+    HAS_SPACES = True
+except ImportError:  # spaces を入れていないローカル環境
+    HAS_SPACES = False
+
     def gpu_task(fn):
         return fn
+
+
+# ZeroGPU は呼び出しごとに GPU を割り当て直すので、モデルを使い回せない
+IS_ZERO_GPU = HAS_SPACES and bool(os.environ.get("SPACE_ID"))
 
 import gradio as gr
 

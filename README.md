@@ -123,10 +123,23 @@ http://localhost:7860 が開く。動画をアップロード →「解析する
 
 ### ZeroGPU について
 
-Hardware に **ZeroGPU** を選ぶと、音声認識だけが GPU で動くようになっている
-（`SPACES_ZERO_GPU` 環境変数で自動判定。動画エンコードは CPU のまま）。
-ZeroGPU は呼び出しごとに GPU を割り当て直すため、その場合だけ Whisper モデルの
-プロセス内キャッシュを切っている。CPU Basic を選んだ場合は全て CPU で動く。
+Hardware に **ZeroGPU** を選んだ場合、音声認識だけが GPU で動く（動画エンコードは CPU のまま）。
+
+実装上の注意が 2 つある。
+
+1. ZeroGPU は起動時に `@spaces.GPU` 付きの関数をスキャンし、1 つも見つからないと
+   `No @spaces.GPU function detected during startup` で起動に失敗する。
+   環境変数で条件分岐してデコレータを付け外しするとこの検出に引っかかるため、
+   **常に適用している**。公式ドキュメントの通り、このデコレータは ZeroGPU 以外の
+   環境では効果を持たないので、ローカル実行でも問題ない。
+2. ZeroGPU は呼び出しごとに GPU を割り当て直すため、前回の割り当てに紐づいた
+   モデルを使い回せない。Space 上でだけ Whisper モデルのプロセス内キャッシュを切っている
+   （`transcriber.load_model(cache=False)`）。
+
+**GPU クォータに注意**: 無料アカウントの ZeroGPU は **1 日あたり 5 分**、
+未ログインの訪問者は 2 分まで。音声認識は速くなるが、使えるのは 1 日数本程度。
+本数を稼ぎたい場合は Space の Settings で **CPU Basic** に切り替えるとクォータ制限が無くなる
+（その場合は全て CPU で動き、`tiny` / `base` 推奨）。
 
 ### 無料枠での制約
 
