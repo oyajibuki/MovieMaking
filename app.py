@@ -39,8 +39,13 @@ IS_ZERO_GPU = HAS_SPACES and bool(os.environ.get("SPACE_ID"))
 import gradio as gr
 
 from autocutter import (
-    audio_analyzer, pipeline, subtitle_utils, transcriber, video_editor, voice_changer
+    ai_voice, audio_analyzer, pipeline, subtitle_utils, transcriber, video_editor,
+    voice_changer,
 )
+
+AI_VOICES = ai_voice.available_builtin_voices()
+AI_UPLOAD = "アップロードした声を使う"
+NO_AI = "使わない（信号処理のプリセットを使う）"
 
 
 LANGUAGES = {
@@ -103,6 +108,9 @@ def analyze(
     voice_strength,
     manual_pitch,
     manual_formant,
+    ai_target,
+    ai_reference_file,
+    ai_steps,
     model_size,
     language_label,
     progress=gr.Progress(),
@@ -125,6 +133,11 @@ def analyze(
         manual_voice=voice_preset == MANUAL_PRESET,
         pitch_shift_semitones=manual_pitch,
         formant_ratio=manual_formant,
+        ai_builtin_voice=AI_VOICES.get(ai_target),
+        ai_reference_wav=(
+            ai_reference_file if ai_target == AI_UPLOAD and ai_reference_file else None
+        ),
+        ai_diffusion_steps=int(ai_steps),
         model_size=model_size,
         language=LANGUAGES[language_label],
     )
@@ -163,7 +176,13 @@ def analyze(
         f"| 実際に使った無音の閾値 | {result.effective_threshold_db:.1f} dBFS |\n"
     )
 
-    if result.source_f0:
+    if settings.uses_ai_voice:
+        target = ai_target if ai_target != AI_UPLOAD else "アップロードした声"
+        stats += (
+            f"\n**声色変換**: AI で「{target}」の声に置き換えます。\n\n"
+            "> 書き出しにはおおよそ音声の長さと同じくらいの時間がかかります。\n"
+        )
+    elif result.source_f0:
         semitones, formant = settings.resolve_voice(result.source_f0)
         stats += (
             f"\n**声色変換**: あなたの声の高さは約 {result.source_f0:.0f} Hz です。\n\n"
@@ -362,6 +381,29 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
                 )
 
             with gr.Accordion("🎤 声色変換", open=True):
+                ai_choices = [NO_AI] + list(AI_VOICES.keys()) + [AI_UPLOAD]
+                ai_target = gr.Dropdown(
+                    ai_choices,
+                    value=NO_AI,
+                    label="AI で別人の声に置き換える",
+                    info=(
+                        "話す長さ・間・抑揚はそのままに、声だけを別人のものに変えます。"
+                        if ai_voice.is_available()
+                        else "⚠️ 未導入です。./setup_ai_voice.sh を実行すると使えます。"
+                    ),
+                    interactive=ai_voice.is_available(),
+                )
+                ai_reference_file = gr.Audio(
+                    label="変換先の声のサンプル（3 秒以上）",
+                    sources=["upload"], type="filepath", visible=False,
+                )
+                ai_steps = gr.Slider(
+                    10, 50, value=25, step=1,
+                    label="品質（拡散ステップ数）",
+                    info="多いほど高品質ですが遅くなります。",
+                    visible=False,
+                )
+
                 voice_preset = gr.Dropdown(
                     list(voice_changer.VOICE_PRESETS.keys()) + [MANUAL_PRESET],
                     value=voice_changer.DEFAULT_PRESET,
@@ -387,6 +429,17 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
                     visible=False,
                 )
 
+                gr.Markdown("---")
+
+                def _toggle_ai(target):
+                    using_ai = target != NO_AI
+                    return (
+                        gr.update(visible=target == AI_UPLOAD),
+                        gr.update(visible=using_ai),
+                        gr.update(visible=not using_ai),   # プリセット
+                        gr.update(visible=not using_ai),   # 強さ
+                    )
+
                 def _toggle_voice_controls(preset):
                     manual = preset == MANUAL_PRESET
                     return (
@@ -399,6 +452,11 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
                     _toggle_voice_controls,
                     inputs=[voice_preset],
                     outputs=[voice_strength, manual_pitch, manual_formant],
+                )
+                ai_target.change(
+                    _toggle_ai,
+                    inputs=[ai_target],
+                    outputs=[ai_reference_file, ai_steps, voice_preset, voice_strength],
                 )
 
             with gr.Accordion("🧠 音声認識", open=False):
@@ -450,6 +508,7 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
             threshold_db, min_silence_len,
             remove_fillers, filler_text, margin_ms,
             voice_preset, voice_strength, manual_pitch, manual_formant,
+            ai_target, ai_reference_file, ai_steps,
             model_size, language_label,
         ],
         outputs=[stats_out, cuts_out, subs_out, state],

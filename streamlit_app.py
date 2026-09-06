@@ -29,7 +29,7 @@ else:
     os.environ["PATH"] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + os.environ["PATH"]
 
 from autocutter import (  # noqa: E402
-    audio_analyzer, pipeline, subtitle_utils, video_editor, voice_changer
+    ai_voice, audio_analyzer, pipeline, subtitle_utils, video_editor, voice_changer
 )
 
 MANUAL_PRESET = "手動で調整する"
@@ -127,6 +127,20 @@ with st.sidebar:
     ) / 1000.0
 
     st.subheader("🎤 声色変換")
+
+    ai_voices = ai_voice.available_builtin_voices()
+    ai_target = None
+    if ai_voice.is_available() and ai_voices:
+        ai_target = st.selectbox(
+            "AI で別人の声に置き換える",
+            ["使わない"] + list(ai_voices.keys()),
+            help="話す長さ・間・抑揚はそのままに、声だけを別人のものに変えます。",
+        )
+        if ai_target == "使わない":
+            ai_target = None
+    else:
+        st.caption(f"AI 声質変換: 未導入 — {ai_voice.unavailable_reason()}")
+
     voice_preset = st.selectbox(
         "声のタイプ",
         list(voice_changer.VOICE_PRESETS.keys()) + [MANUAL_PRESET],
@@ -195,6 +209,7 @@ settings = pipeline.CutSettings(
     remove_fillers=remove_fillers,
     filler_words=filler_words,
     margin=margin,
+    ai_builtin_voice=ai_voices.get(ai_target) if ai_target else None,
     voice_preset=voice_preset,
     voice_strength=voice_strength if voice_preset != MANUAL_PRESET else 1.0,
     manual_voice=voice_preset == MANUAL_PRESET,

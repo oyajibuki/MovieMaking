@@ -346,5 +346,59 @@ class TestMediaTypeDetection(unittest.TestCase):
         self.assertGreaterEqual(len(self.ve._EXPORT_FORMATS[".ogg"]), 2)
 
 
+class TestAiVoiceAvailability(unittest.TestCase):
+    """AI 声質変換は任意導入なので、未導入でも壊れないこと。"""
+
+    def setUp(self):
+        from autocutter import ai_voice
+        self.av = ai_voice
+
+    def test_availability_check_never_raises(self):
+        self.assertIsInstance(self.av.is_available(), bool)
+
+    def test_unavailable_reason_is_empty_only_when_available(self):
+        reason = self.av.unavailable_reason()
+        self.assertEqual(bool(reason), not self.av.is_available())
+
+    def test_builtin_voices_is_a_mapping(self):
+        voices = self.av.available_builtin_voices()
+        self.assertIsInstance(voices, dict)
+        # 値は say に渡す音声名なので、既知の一覧に含まれること
+        for name in voices.values():
+            self.assertIn(name, self.av.MACOS_JA_VOICES.values())
+
+    def test_convert_reports_a_clear_error_when_not_installed(self):
+        if self.av.is_available():
+            self.skipTest("導入済みの環境ではこの分岐を通らない")
+        with self.assertRaises(RuntimeError):
+            self.av.convert("a.wav", "b.wav", "c.wav")
+
+
+class TestVoiceModeSelection(unittest.TestCase):
+    """AI 指定があるときは信号処理プリセットより優先されること。"""
+
+    def setUp(self):
+        from autocutter import pipeline
+        self.pipeline = pipeline
+
+    def test_no_ai_by_default(self):
+        self.assertFalse(self.pipeline.CutSettings().uses_ai_voice)
+
+    def test_builtin_voice_enables_ai(self):
+        s = self.pipeline.CutSettings(ai_builtin_voice="Kyoko")
+        self.assertTrue(s.uses_ai_voice)
+
+    def test_reference_wav_enables_ai(self):
+        s = self.pipeline.CutSettings(ai_reference_wav="/tmp/ref.wav")
+        self.assertTrue(s.uses_ai_voice)
+
+    def test_preset_still_resolves_alongside_ai(self):
+        # AI 指定時もプリセットの解決自体は壊れないこと
+        s = self.pipeline.CutSettings(ai_builtin_voice="Kyoko", voice_preset="女性の声")
+        semitones, formant = s.resolve_voice(source_f0=120.0)
+        self.assertIsInstance(semitones, float)
+        self.assertIsInstance(formant, float)
+
+
 if __name__ == "__main__":
     unittest.main()

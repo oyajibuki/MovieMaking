@@ -10,7 +10,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import audio_analyzer, subtitle_utils, transcriber, video_editor, voice_changer
+from . import (
+    ai_voice, audio_analyzer, subtitle_utils, transcriber, video_editor, voice_changer
+)
 
 Segment = tuple[float, float]
 
@@ -51,6 +53,16 @@ class CutSettings:
     pitch_shift_semitones: float = 0.0
     formant_ratio: float = 1.0
     pitch_method: str = "librosa"
+
+    # AI 声質変換（別人の声に置き換える）。指定するとプリセットより優先される。
+    # 参照音声のパス、または macOS 組み込み音声の say 名。
+    ai_reference_wav: str | None = None
+    ai_builtin_voice: str | None = None
+    ai_diffusion_steps: int = 25
+
+    @property
+    def uses_ai_voice(self) -> bool:
+        return bool(self.ai_reference_wav or self.ai_builtin_voice)
 
     def resolve_voice(self, source_f0: float | None = None) -> tuple[float, float]:
         """(ピッチ半音, フォルマント倍率) を決める。"""
@@ -217,13 +229,33 @@ def render(
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> str:
     """解析結果に従って動画（または音声）を書き出す。"""
+    source_wav = os.path.join(work_dir, "source_audio.wav")
     converted_audio = None
+
+    # --- AI 声質変換（別人の声）を使う場合はこちらが優先 ---
+    if settings.uses_ai_voice:
+        if progress_callback:
+            progress_callback(0.1, "AI で声を変換中...（実時間程度かかります）")
+
+        reference = settings.ai_reference_wav
+        if not reference and settings.ai_builtin_voice:
+            reference = ai_voice.build_reference(
+                settings.ai_builtin_voice, os.path.join(work_dir, "refs")
+            )
+
+        converted_audio = ai_voice.convert(
+            source_wav,
+            reference,
+            os.path.join(work_dir, "converted_audio.wav"),
+            diffusion_steps=settings.ai_diffusion_steps,
+        )
+
     semitones, formant = settings.resolve_voice(result.source_f0)
-    if semitones or formant != 1.0:
+    if converted_audio is None and (semitones or formant != 1.0):
         if progress_callback:
             progress_callback(0.1, "声色を変換中...")
         converted_audio = voice_changer.convert_voice_file(
-            os.path.join(work_dir, "source_audio.wav"),
+            source_wav,
             os.path.join(work_dir, "converted_audio.wav"),
             semitones=semitones,
             formant_ratio=formant,

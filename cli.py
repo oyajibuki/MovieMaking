@@ -15,7 +15,7 @@ import os
 import sys
 import tempfile
 
-from autocutter import audio_analyzer, pipeline, video_editor, voice_changer
+from autocutter import ai_voice, audio_analyzer, pipeline, video_editor, voice_changer
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,6 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="フォルマント倍率（既定 1.0）。1 より大きいと細い声、小さいと太い声",
     )
     p.add_argument("--list-voices", action="store_true", help="声色プリセットの一覧を表示して終了")
+    p.add_argument(
+        "--ai-voice", default=None,
+        help="AI で別人の声に置き換える。macOS 組み込み音声名（例: Kyoko）"
+             "または参照音声ファイルのパス",
+    )
+    p.add_argument(
+        "--ai-steps", type=int, default=25,
+        help="AI 変換の拡散ステップ数（既定 25）。多いほど高品質だが遅い",
+    )
 
     p.add_argument("--model", default="base", help="Whisper モデル（既定 base）")
     p.add_argument("--language", default="ja", help="音声の言語（既定 ja）")
@@ -73,9 +82,19 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.list_voices:
-        print("利用できる声色プリセット:")
-        for name, (semitones, formant) in voice_changer.VOICE_PRESETS.items():
-            print(f"  {name:24s} ピッチ {semitones:+5.1f} 半音 / フォルマント {formant:.2f} 倍")
+        print("信号処理のプリセット（--voice）:")
+        for name, preset in voice_changer.VOICE_PRESETS.items():
+            target = f"{preset['target_f0']:.0f} Hz" if preset["target_f0"] else "—"
+            print(f"  {name:24s} 目標の高さ {target:>8s} / フォルマント {preset['formant']:.2f} 倍")
+
+        print()
+        if ai_voice.is_available():
+            print("AI 声質変換で使える組み込みの声（--ai-voice）:")
+            for label, name in ai_voice.available_builtin_voices().items():
+                print(f"  {name:12s} {label}")
+            print("  （参照音声ファイルのパスを直接指定することもできます）")
+        else:
+            print(f"AI 声質変換: 未導入 — {ai_voice.unavailable_reason()}")
         return 0
 
     if not args.input:
@@ -102,6 +121,17 @@ def main(argv: list[str] | None = None) -> int:
         else list(audio_analyzer.DEFAULT_FILLER_WORDS_JA)
     )
 
+    # --ai-voice はファイルパスとしても組み込み音声名としても受け取る
+    ai_reference = ai_builtin = None
+    if args.ai_voice:
+        if os.path.exists(args.ai_voice):
+            ai_reference = args.ai_voice
+        else:
+            ai_builtin = args.ai_voice
+        if not ai_voice.is_available():
+            print(f"AI 声質変換を使えません: {ai_voice.unavailable_reason()}", file=sys.stderr)
+            return 1
+
     settings = pipeline.CutSettings(
         remove_silence=not args.no_silence,
         silence_threshold_db=args.threshold if args.threshold is not None else -38.0,
@@ -116,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
         manual_voice=args.voice is None and (args.pitch or args.formant != 1.0),
         pitch_shift_semitones=args.pitch,
         formant_ratio=args.formant,
+        ai_builtin_voice=ai_builtin,
+        ai_reference_wav=ai_reference,
+        ai_diffusion_steps=args.ai_steps,
         model_size=args.model,
         language=args.language,
     )
