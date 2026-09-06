@@ -55,6 +55,20 @@ brew install ffmpeg python@3.12
 
 ### GUI（Gradio / Hugging Face Spaces と同じもの）
 
+macOS ならフォルダ内の **「AutoCutter を起動.command」をダブルクリック**するだけ。
+Terminal が開いてサーバーが立ち上がり、ブラウザが自動で開く。
+終了はそのウィンドウで Control + C。
+
+デスクトップにショートカットを置きたい場合は
+**「デスクトップにショートカットを作る.command」** を一度ダブルクリックする。
+パソコンごとにフォルダの場所が変わり得るので、**使う機械それぞれで一度ずつ**実行する。
+
+> `.sh` はダブルクリックするとテキストエディタで開いてしまうことがあるため、
+> ダブルクリック用には `.command` を用意している。
+> 「開発元が未確認」と出る場合は、右クリック →「開く」→「開く」を一度だけ選ぶ。
+
+ターミナルから起動する場合:
+
 ```bash
 ./run_local.sh
 ```
@@ -189,6 +203,8 @@ autocutter/
 └── pipeline.py         上記を設計書のフロー順に繋ぐオーケストレータ
 ├── ai_voice.py         AI 声質変換（seed-vc を別プロセスで呼ぶ・任意導入）
 ├── ffmpeg_tools.py     ffmpeg の場所を一元管理（moviepy と pydub で揃える）
+AutoCutter を起動.command        ダブルクリックで起動（macOS）
+デスクトップにショートカットを作る.command  デスクトップにリンクを作る（macOS・各機で一度）
 app.py                  Gradio UI（Hugging Face Spaces のエントリポイント）
 streamlit_app.py        Streamlit UI（ローカル用）
 cli.py                  コマンドライン版
