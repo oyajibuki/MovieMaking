@@ -68,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
              "または参照音声ファイルのパス",
     )
     p.add_argument(
+        "--no-keep-intonation", action="store_true",
+        help="AI 変換で元の抑揚を追従させない（速くなるが機械的な喋りになる）",
+    )
+    p.add_argument(
         "--ai-steps", type=int, default=25,
         help="AI 変換の拡散ステップ数（既定 25）。多いほど高品質だが遅い",
     )
@@ -149,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         ai_builtin_voice=ai_builtin,
         ai_reference_wav=ai_reference,
         ai_diffusion_steps=args.ai_steps,
+        ai_preserve_intonation=not args.no_keep_intonation,
         model_size=args.model,
         language=args.language,
     )

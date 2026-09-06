@@ -15,6 +15,8 @@ fi
 
 echo "📥 seed-vc を取得中..."
 if [ -d vendor/seed-vc/.git ]; then
+  # 当てた修正は毎回入れ直すので、取得前に元に戻しておく
+  git -C vendor/seed-vc checkout -- . 2>/dev/null || true
   git -C vendor/seed-vc pull --ff-only
 else
   mkdir -p vendor
@@ -34,6 +36,9 @@ echo "📦 専用の仮想環境を作成中...（数分かかります）"
   "huggingface-hub>=0.28.1" "munch==4.0.0" "einops==0.8.0" \
   "descript-audio-codec==1.0.0" "transformers==4.46.3" \
   "soundfile==0.12.1" pyyaml "hydra-core==1.3.2" resemblyzer accelerate
+
+# Apple Silicon（MPS）で抑揚保持が動くように seed-vc を修正する
+./.venv/bin/python -c "from autocutter import ai_voice; print('MPS 対応の修正:', '適用' if ai_voice.ensure_mps_patch() else '不要')" 2>/dev/null || true
 
 echo
 echo "🎉 完了しました。"

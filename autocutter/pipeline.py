@@ -59,6 +59,8 @@ class CutSettings:
     ai_reference_wav: str | None = None
     ai_builtin_voice: str | None = None
     ai_diffusion_steps: int = 25
+    # 元の抑揚を追従させる。切ると機械的な喋りになるので既定で有効
+    ai_preserve_intonation: bool = True
 
     @property
     def uses_ai_voice(self) -> bool:
@@ -248,6 +250,7 @@ def render(
             reference,
             os.path.join(work_dir, "converted_audio.wav"),
             diffusion_steps=settings.ai_diffusion_steps,
+            preserve_intonation=settings.ai_preserve_intonation,
         )
 
     semitones, formant = settings.resolve_voice(result.source_f0)

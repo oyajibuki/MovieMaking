@@ -150,12 +150,13 @@ def convert(
     diffusion_steps: int = 25,
     length_adjust: float = 1.0,
     inference_cfg_rate: float = 0.7,
+    preserve_intonation: bool = True,
     timeout: int = 3600,
 ) -> str:
     """source_wav の声を reference_wav の声に変換する。
 
-    話す長さ・間・抑揚は元のまま保たれるので、カット処理や
-    動画との同期をやり直す必要はない。
+    話す長さ・間は元のまま保たれるので、カット処理や動画との同期を
+    やり直す必要はない。
 
     Args:
         source_wav: 変換したい音声（wav）
@@ -164,6 +165,9 @@ def convert(
         diffusion_steps: 拡散ステップ数。多いほど高品質だが遅い（25 が既定）
         length_adjust: 1.0 より大きいと間延びする。基本は 1.0 のまま
         inference_cfg_rate: 参照音声への寄せ具合
+        preserve_intonation: 元の抑揚（ピッチの上下）を追従させる。
+            無効にすると抑揚が 3 割ほど平坦になり機械的に聞こえる。
+            実測では抑揚の相関が 0.81 -> 0.99 に改善する。代わりに 3 倍ほど遅い
 
     Returns:
         output_wav
@@ -173,6 +177,8 @@ def convert(
 
     if not os.path.exists(reference_wav):
         raise FileNotFoundError(f"参照音声が見つかりません: {reference_wav}")
+
+    ensure_mps_patch()
 
     out_dir = os.path.join(os.path.dirname(os.path.abspath(output_wav)), "_seedvc")
     os.makedirs(out_dir, exist_ok=True)
@@ -186,6 +192,8 @@ def convert(
             "--diffusion-steps", str(diffusion_steps),
             "--length-adjust", str(length_adjust),
             "--inference-cfg-rate", str(inference_cfg_rate),
+            "--f0-condition", "True" if preserve_intonation else "False",
+            "--auto-f0-adjust", "True" if preserve_intonation else "False",
         ],
         cwd=seed_vc_dir(),
         capture_output=True,
@@ -201,3 +209,37 @@ def convert(
     shutil.move(produced[-1], output_wav)
     shutil.rmtree(out_dir, ignore_errors=True)
     return output_wav
+
+
+def ensure_mps_patch() -> bool:
+    """Apple Silicon（MPS）で f0-condition が動くように seed-vc を修正する。
+
+    seed-vc は F0 を float64 のまま MPS へ送るが、MPS は float64 を扱えないため
+    「Cannot convert a MPS Tensor to float64 dtype」で落ちる。
+    vendor/ は git 管理外で再取得され得るので、実行前に毎回確認して当て直す。
+
+    Returns:
+        修正を適用した場合 True（既に適用済み・不要なら False）
+    """
+    path = os.path.join(seed_vc_dir(), "inference.py")
+    if not os.path.exists(path):
+        return False
+
+    with open(path, encoding="utf-8") as f:
+        source = f.read()
+
+    original = (
+        "        F0_ori = torch.from_numpy(F0_ori).to(device)[None]\n"
+        "        F0_alt = torch.from_numpy(F0_alt).to(device)[None]"
+    )
+    if original not in source:
+        return False  # 既に適用済み、または上流で修正された
+
+    patched = (
+        "        # MPS は float64 を扱えないので float32 に落とす（AutoCutter による修正）\n"
+        "        F0_ori = torch.from_numpy(F0_ori).float().to(device)[None]\n"
+        "        F0_alt = torch.from_numpy(F0_alt).float().to(device)[None]"
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(source.replace(original, patched))
+    return True

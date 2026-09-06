@@ -110,6 +110,7 @@ def analyze(
     manual_formant,
     ai_target,
     ai_reference_file,
+    ai_keep_intonation,
     ai_steps,
     model_size,
     language_label,
@@ -138,6 +139,7 @@ def analyze(
             ai_reference_file if ai_target == AI_UPLOAD and ai_reference_file else None
         ),
         ai_diffusion_steps=int(ai_steps),
+        ai_preserve_intonation=bool(ai_keep_intonation),
         model_size=model_size,
         language=LANGUAGES[language_label],
     )
@@ -180,7 +182,8 @@ def analyze(
         target = ai_target if ai_target != AI_UPLOAD else "アップロードした声"
         stats += (
             f"\n**声色変換**: AI で「{target}」の声に置き換えます。\n\n"
-            "> 書き出しにはおおよそ音声の長さと同じくらいの時間がかかります。\n"
+            "> 書き出しには音声の長さの 1〜3 倍ほど時間がかかります"
+            "（抑揚を保つ設定では長くなります）。\n"
         )
     elif result.source_f0:
         semitones, formant = settings.resolve_voice(result.source_f0)
@@ -397,6 +400,15 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
                     label="変換先の声のサンプル（3 秒以上）",
                     sources=["upload"], type="filepath", visible=False,
                 )
+                ai_keep_intonation = gr.Checkbox(
+                    label="元の抑揚（イントネーション）を保つ",
+                    value=True,
+                    info=(
+                        "切ると抑揚が平坦になり機械的な喋りになります。"
+                        "保つ場合は 3 倍ほど時間がかかります。"
+                    ),
+                    visible=False,
+                )
                 ai_steps = gr.Slider(
                     10, 50, value=25, step=1,
                     label="品質（拡散ステップ数）",
@@ -435,7 +447,8 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
                     using_ai = target != NO_AI
                     return (
                         gr.update(visible=target == AI_UPLOAD),
-                        gr.update(visible=using_ai),
+                        gr.update(visible=using_ai),       # 抑揚を保つ
+                        gr.update(visible=using_ai),       # ステップ数
                         gr.update(visible=not using_ai),   # プリセット
                         gr.update(visible=not using_ai),   # 強さ
                     )
@@ -456,7 +469,10 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
                 ai_target.change(
                     _toggle_ai,
                     inputs=[ai_target],
-                    outputs=[ai_reference_file, ai_steps, voice_preset, voice_strength],
+                    outputs=[
+                        ai_reference_file, ai_keep_intonation, ai_steps,
+                        voice_preset, voice_strength,
+                    ],
                 )
 
             with gr.Accordion("🧠 音声認識", open=False):
@@ -508,7 +524,7 @@ with gr.Blocks(title="AutoCutter PRO") as demo:
             threshold_db, min_silence_len,
             remove_fillers, filler_text, margin_ms,
             voice_preset, voice_strength, manual_pitch, manual_formant,
-            ai_target, ai_reference_file, ai_steps,
+            ai_target, ai_reference_file, ai_keep_intonation, ai_steps,
             model_size, language_label,
         ],
         outputs=[stats_out, cuts_out, subs_out, state],
