@@ -263,6 +263,39 @@ class TestVoicePresets(unittest.TestCase):
             self.assertLess(semitones, 0, name)
             self.assertLess(formant, 1.0, name)
 
+    def test_preset_targets_the_requested_pitch_for_a_low_voice(self):
+        # 68Hz の低い声でも「女性の声」は 200Hz 付近に届くこと
+        semitones, _ = self.vc.resolve_preset("女性の声", 1.0, source_f0=68.0)
+        reached = 68.0 * 2 ** (semitones / 12)
+        self.assertAlmostEqual(reached, 200.0, delta=5.0)
+
+    def test_preset_targets_the_requested_pitch_for_a_high_voice(self):
+        # 高い声なら同じプリセットでも変化量は小さくなる
+        semitones, _ = self.vc.resolve_preset("女性の声", 1.0, source_f0=180.0)
+        reached = 180.0 * 2 ** (semitones / 12)
+        self.assertAlmostEqual(reached, 200.0, delta=5.0)
+
+    def test_deep_preset_never_raises_pitch(self):
+        # 目標より既に低い声に「太い男の声」を掛けても高くならないこと
+        for f0 in [60.0, 68.0, 80.0, 120.0]:
+            semitones, _ = self.vc.resolve_preset("太い男の声", 1.0, source_f0=f0)
+            self.assertLess(semitones, 0, f"f0={f0}")
+
+    def test_high_preset_never_lowers_pitch(self):
+        for f0 in [68.0, 220.0, 300.0]:
+            semitones, _ = self.vc.resolve_preset("女性の声", 1.0, source_f0=f0)
+            self.assertGreater(semitones, 0, f"f0={f0}")
+
+    def test_describe_reports_clamping_for_unreachable_targets(self):
+        # 68Hz から 290Hz は上限を超えるので、届かないことが分かるようにする
+        info = self.vc.describe_preset("子供の声", 1.0, source_f0=68.0)
+        self.assertTrue(info["clamped"])
+        self.assertLess(info["reached_f0"], info["target_f0"])
+
+    def test_describe_reports_no_clamping_when_target_is_reachable(self):
+        info = self.vc.describe_preset("女性の声", 1.0, source_f0=150.0)
+        self.assertFalse(info["clamped"])
+
     def test_strength_scales_both_axes(self):
         full = self.vc.resolve_preset("女性の声", 1.0)
         half = self.vc.resolve_preset("女性の声", 0.5)

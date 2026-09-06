@@ -68,13 +68,6 @@ def parse_fillers(text: str) -> list[str]:
 MANUAL_PRESET = "手動で調整する"
 
 
-def _resolve_voice(preset, strength, manual_pitch, manual_formant):
-    """プリセット（または手動指定）から (ピッチ半音, フォルマント倍率) を求める。"""
-    if preset == MANUAL_PRESET:
-        return float(manual_pitch), float(manual_formant)
-    return voice_changer.resolve_preset(preset, float(strength))
-
-
 @gpu_task
 def run_transcribe(audio_path: str, model_size: str, language: str) -> dict:
     """音声認識だけを切り出した関数。ZeroGPU ではここだけが GPU を掴む。
@@ -118,10 +111,6 @@ def analyze(
     if not media_path:
         raise gr.Error("先に動画または音声ファイルをアップロードしてください。")
 
-    semitones, formant = _resolve_voice(
-        voice_preset, voice_strength, manual_pitch, manual_formant
-    )
-
     settings = pipeline.CutSettings(
         remove_silence=remove_silence,
         silence_threshold_db=threshold_db,
@@ -131,8 +120,11 @@ def analyze(
         remove_fillers=remove_fillers,
         filler_words=parse_fillers(filler_text),
         margin=margin_ms / 1000.0,
-        pitch_shift_semitones=semitones,
-        formant_ratio=formant,
+        voice_preset=voice_preset,
+        voice_strength=voice_strength,
+        manual_voice=voice_preset == MANUAL_PRESET,
+        pitch_shift_semitones=manual_pitch,
+        formant_ratio=manual_formant,
         model_size=model_size,
         language=LANGUAGES[language_label],
     )
@@ -170,6 +162,27 @@ def analyze(
         f"| 素材の平均音量 | {result.average_loudness_db:.1f} dBFS |\n"
         f"| 実際に使った無音の閾値 | {result.effective_threshold_db:.1f} dBFS |\n"
     )
+
+    if result.source_f0:
+        semitones, formant = settings.resolve_voice(result.source_f0)
+        stats += (
+            f"\n**声色変換**: あなたの声の高さは約 {result.source_f0:.0f} Hz です。\n\n"
+        )
+        if semitones or formant != 1.0:
+            info = voice_changer.describe_preset(
+                voice_preset, voice_strength, result.source_f0
+            ) if voice_preset != MANUAL_PRESET else None
+            stats += (
+                f"「{voice_preset}」→ ピッチ {semitones:+.1f} 半音"
+                f"（{result.source_f0:.0f} Hz → {result.source_f0 * 2 ** (semitones/12):.0f} Hz）"
+                f" / フォルマント {formant:.2f} 倍\n"
+            )
+            if info and info["clamped"]:
+                stats += (
+                    f"\n> ⚠️ 目標の {info['target_f0']:.0f} Hz には届いていません"
+                    f"（音質を保てる範囲の上限に達したため）。"
+                    f"元の声が低いほど、女性・子供の声にはしにくくなります。\n"
+                )
 
     if result.removed_ratio > 0.6:
         stats += (

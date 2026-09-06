@@ -19,40 +19,101 @@ from __future__ import annotations
 
 import os
 
-# 実用上、これ以上動かすとケロケロ声になり聞き取れなくなる
-MAX_SEMITONES = 12.0
+# 低い声から女性・子供の音域へ上げるには大きな変化量が要る
+MAX_SEMITONES = 20.0
 
 # フォルマント倍率の実用範囲
 MIN_FORMANT = 0.70
 MAX_FORMANT = 1.45
 
-# 声色プリセット: 名前 -> (ピッチ半音, フォルマント倍率)
-# 一般的な成人男性の声を基準に調整している。元の声質によって効き方は変わるため、
-# UI 側で「変化の強さ」を掛けて微調整できるようにしている。
-VOICE_PRESETS: dict[str, tuple[float, float]] = {
-    "そのまま（変換しない）": (0.0, 1.00),
-    "女性の声": (5.0, 1.16),
-    "高めの女性の声": (7.0, 1.24),
-    "子供の声": (8.5, 1.34),
-    "太い男の声": (-4.0, 0.86),
-    "低い男の声": (-2.5, 0.92),
-    "年配の男性の声": (-3.5, 0.95),
-    "軽い匿名化（自然さ優先）": (2.0, 1.07),
+# 声色プリセット
+#   target_f0 : 目指す声の高さ（Hz）。話者の実際の高さから必要な半音数を計算する
+#   formant   : フォルマント倍率
+#   fallback  : F0 を測れなかったときに使う固定の半音数
+#
+# 相対的な半音数で指定すると、元の声の高さによって着地点がまるで変わってしまう。
+# 例えば F0 が 74Hz の低い声では +5 半音でも 101Hz にしかならず、
+# 女性の音域（約 200Hz）には全く届かない。そのため目標値で指定する。
+VOICE_PRESETS: dict[str, dict] = {
+    "そのまま（変換しない）": {
+        "target_f0": None, "formant": 1.00, "fallback": 0.0, "direction": None},
+    "女性の声": {
+        "target_f0": 200.0, "formant": 1.18, "fallback": 6.0, "direction": "up"},
+    "高めの女性の声": {
+        "target_f0": 240.0, "formant": 1.26, "fallback": 8.0, "direction": "up"},
+    "子供の声": {
+        "target_f0": 290.0, "formant": 1.38, "fallback": 10.0, "direction": "up"},
+    "太い男の声": {
+        "target_f0": 85.0, "formant": 0.84, "fallback": -4.0, "direction": "down"},
+    "低い男の声": {
+        "target_f0": 100.0, "formant": 0.90, "fallback": -2.5, "direction": "down"},
+    "年配の男性の声": {
+        "target_f0": 110.0, "formant": 0.95, "fallback": -3.0, "direction": "down"},
+    "軽い匿名化（自然さ優先）": {
+        "target_f0": None, "formant": 1.07, "fallback": 2.0, "direction": None},
 }
 
 DEFAULT_PRESET = "そのまま（変換しない）"
 
+# F0 推定に使う範囲（極端に低い声・高い声も拾えるようにする）
+F0_MIN = 50.0
+F0_MAX = 600.0
 
-def resolve_preset(name: str, strength: float = 1.0) -> tuple[float, float]:
-    """プリセット名と強さから (ピッチ半音, フォルマント倍率) を返す。
+
+def estimate_f0(audio_path: str) -> float | None:
+    """話者の基本周波数（声の高さ）の中央値を Hz で返す。
+
+    有声フレームが取れないときは None。
+    """
+    try:
+        import librosa
+        import numpy as np
+
+        y, sr = librosa.load(audio_path, sr=22050, mono=True)
+        if len(y) < sr // 4:
+            return None
+
+        f0, _voiced, _prob = librosa.pyin(y, fmin=F0_MIN, fmax=F0_MAX, sr=sr)
+        f0 = f0[~np.isnan(f0)]
+        if len(f0) == 0:
+            return None
+        return float(np.median(f0))
+    except Exception:
+        return None
+
+
+def resolve_preset(
+    name: str, strength: float = 1.0, source_f0: float | None = None
+) -> tuple[float, float]:
+    """プリセット名から (ピッチ半音, フォルマント倍率) を返す。
+
+    source_f0（話者の実際の声の高さ）が分かっていれば、目標の高さに
+    届くだけの半音数を計算する。分からなければ固定値にフォールバックする。
 
     strength は変化量の倍率。1.0 が既定で、0 にすると無変換になる。
     """
-    semitones, formant = VOICE_PRESETS.get(name, VOICE_PRESETS[DEFAULT_PRESET])
+    import math
+
+    preset = VOICE_PRESETS.get(name, VOICE_PRESETS[DEFAULT_PRESET])
+
+    target = preset["target_f0"]
+    fallback = preset["fallback"]
+    direction = preset.get("direction")
+
+    if target and source_f0 and source_f0 > 0:
+        semitones = 12.0 * math.log2(target / source_f0)
+        # 既に目標より低い声に「太い男の声」を掛けると逆に高くなってしまう。
+        # 意図した向きと逆になる場合は固定値に戻して、さらに深く／高くする。
+        if direction == "down" and semitones > 0:
+            semitones = fallback
+        elif direction == "up" and semitones < 0:
+            semitones = fallback
+    else:
+        semitones = fallback
 
     semitones *= strength
     # フォルマントは 1.0 を中心に増減するので、1.0 からの差分に強さを掛ける
-    formant = 1.0 + (formant - 1.0) * strength
+    formant = 1.0 + (preset["formant"] - 1.0) * strength
 
     semitones = max(-MAX_SEMITONES, min(MAX_SEMITONES, semitones))
     formant = max(MIN_FORMANT, min(MAX_FORMANT, formant))
@@ -296,3 +357,30 @@ def _shift_with_pydub(input_path: str, output_path: str, semitones: float) -> st
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     shifted.export(output_path, format="wav")
     return output_path
+
+
+def describe_preset(
+    name: str, strength: float = 1.0, source_f0: float | None = None
+) -> dict:
+    """プリセットを適用したときに何が起きるかを説明用にまとめる。
+
+    変化量が大きすぎて上限で頭打ちになった場合は reached_f0 が target_f0 に
+    届かない。UI 側でその旨を伝えるために使う。
+    """
+    semitones, formant = resolve_preset(name, strength, source_f0)
+    preset = VOICE_PRESETS.get(name, VOICE_PRESETS[DEFAULT_PRESET])
+    target = preset["target_f0"]
+
+    reached = source_f0 * (2.0 ** (semitones / 12.0)) if source_f0 else None
+    clamped = bool(
+        target and reached and abs(reached - target) > target * 0.05
+    )
+
+    return {
+        "semitones": semitones,
+        "formant": formant,
+        "source_f0": source_f0,
+        "target_f0": target,
+        "reached_f0": reached,
+        "clamped": clamped,
+    }

@@ -102,11 +102,6 @@ def main(argv: list[str] | None = None) -> int:
         else list(audio_analyzer.DEFAULT_FILLER_WORDS_JA)
     )
 
-    if args.voice:
-        semitones, formant = voice_changer.resolve_preset(args.voice, args.voice_strength)
-    else:
-        semitones, formant = args.pitch, args.formant
-
     settings = pipeline.CutSettings(
         remove_silence=not args.no_silence,
         silence_threshold_db=args.threshold if args.threshold is not None else -38.0,
@@ -116,8 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         remove_fillers=not args.no_filler,
         filler_words=fillers,
         margin=args.margin,
-        pitch_shift_semitones=semitones,
-        formant_ratio=formant,
+        voice_preset=args.voice or voice_changer.DEFAULT_PRESET,
+        voice_strength=args.voice_strength,
+        manual_voice=args.voice is None and (args.pitch or args.formant != 1.0),
+        pitch_shift_semitones=args.pitch,
+        formant_ratio=args.formant,
         model_size=args.model,
         language=args.language,
     )
@@ -139,6 +137,15 @@ def main(argv: list[str] | None = None) -> int:
             f"({result.removed_ratio * 100:.1f}% カット / "
             f"無音 {len(result.silence_cuts)} 箇所, フィラー {len(result.filler_cuts)} 箇所)"
         )
+
+        if result.source_f0:
+            semitones, formant = settings.resolve_voice(result.source_f0)
+            reached = result.source_f0 * 2 ** (semitones / 12)
+            print(
+                f"声の高さ {result.source_f0:.0f} Hz"
+                + (f" -> {reached:.0f} Hz（{semitones:+.1f} 半音 / "
+                   f"フォルマント {formant:.2f} 倍）" if semitones or formant != 1.0 else "")
+            )
 
         if result.removed_ratio > 0.6:
             print(

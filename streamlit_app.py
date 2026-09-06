@@ -133,6 +133,7 @@ with st.sidebar:
         help="声の高さ（ピッチ）と声質（フォルマント）をまとめて変えます。",
     )
     if voice_preset == MANUAL_PRESET:
+        voice_strength = 1.0
         pitch_shift = st.slider("ピッチ（半音）", -12.0, 12.0, 0.0, 0.5)
         formant_ratio = st.slider(
             "フォルマント倍率",
@@ -144,10 +145,8 @@ with st.sidebar:
             "変化の強さ", 0.0, 1.5, 1.0, 0.05,
             help="1.0 が既定。効きが弱いと感じたら上げ、不自然なら下げてください。",
         )
-        pitch_shift, formant_ratio = voice_changer.resolve_preset(
-            voice_preset, voice_strength
-        )
-        st.caption(f"ピッチ {pitch_shift:+.1f} 半音 / フォルマント {formant_ratio:.2f} 倍")
+        pitch_shift, formant_ratio = 0.0, 1.0
+        st.caption("変化量は解析時に測った声の高さに合わせて決まります。")
 
     st.divider()
     st.subheader("🧠 音声認識")
@@ -196,6 +195,9 @@ settings = pipeline.CutSettings(
     remove_fillers=remove_fillers,
     filler_words=filler_words,
     margin=margin,
+    voice_preset=voice_preset,
+    voice_strength=voice_strength if voice_preset != MANUAL_PRESET else 1.0,
+    manual_voice=voice_preset == MANUAL_PRESET,
     pitch_shift_semitones=pitch_shift,
     formant_ratio=formant_ratio,
     model_size=model_size,
@@ -241,6 +243,13 @@ st.caption(
     f"素材の平均音量 {result.average_loudness_db:.1f} dBFS / "
     f"実際に使った無音の閾値 {result.effective_threshold_db:.1f} dBFS"
 )
+if result.source_f0:
+    _st, _fm = settings.resolve_voice(result.source_f0)
+    st.caption(
+        f"声の高さ {result.source_f0:.0f} Hz"
+        + (f" → {result.source_f0 * 2 ** (_st/12):.0f} Hz"
+           f"（{_st:+.1f} 半音 / フォルマント {_fm:.2f} 倍）" if _st or _fm != 1.0 else "")
+    )
 if result.removed_ratio > 0.6:
     st.warning(
         "6 割以上カットされています。喋っている部分まで無音と判定されている"

@@ -41,13 +41,28 @@ class CutSettings:
     min_keep_len: float = 0.10    # これより短い残存区間は捨てる
 
     # 声色変換
+    # プリセットを使う場合は voice_preset / voice_strength を指定する。
+    # 話者の声の高さに応じて必要な半音数が変わるため、解析で F0 を測ってから
+    # 書き出し時に解決する（resolve_voice）。
+    voice_preset: str = voice_changer.DEFAULT_PRESET
+    voice_strength: float = 1.0
+    # manual_voice=True のときは下の 2 つをそのまま使う
+    manual_voice: bool = False
     pitch_shift_semitones: float = 0.0
     formant_ratio: float = 1.0
     pitch_method: str = "librosa"
 
-    @property
-    def changes_voice(self) -> bool:
-        return bool(self.pitch_shift_semitones) or self.formant_ratio != 1.0
+    def resolve_voice(self, source_f0: float | None = None) -> tuple[float, float]:
+        """(ピッチ半音, フォルマント倍率) を決める。"""
+        if self.manual_voice:
+            return self.pitch_shift_semitones, self.formant_ratio
+        return voice_changer.resolve_preset(
+            self.voice_preset, self.voice_strength, source_f0
+        )
+
+    def changes_voice(self, source_f0: float | None = None) -> bool:
+        semitones, formant = self.resolve_voice(source_f0)
+        return bool(semitones) or formant != 1.0
 
     # 音声認識
     model_size: str = "base"
@@ -69,6 +84,8 @@ class CutResult:
     # 実際に使われた無音の閾値と素材の平均音量（UI での説明用）
     effective_threshold_db: float | None = None
     average_loudness_db: float | None = None
+    # 話者の声の高さ（Hz）。声色プリセットの変化量を決めるのに使う
+    source_f0: float | None = None
 
     @property
     def new_duration(self) -> float:
@@ -117,6 +134,9 @@ def analyze(
 
     duration = video_editor.get_duration(media_path)
     audio_only = video_editor.is_audio_only(media_path)
+
+    # 声の高さを測っておく（声色プリセットが目標の高さに合わせるため）
+    source_f0 = voice_changer.estimate_f0(audio_path)
 
     # 2. 音声認識（既存 Whisper の結果を渡せば再解析しない）
     #    フィラー検知だけでなくテロップ出力にも使うため、常に実行する
@@ -184,6 +204,7 @@ def analyze(
         is_audio_only=audio_only,
         effective_threshold_db=effective_threshold,
         average_loudness_db=average_loudness,
+        source_f0=source_f0,
     )
 
 
@@ -197,14 +218,15 @@ def render(
 ) -> str:
     """解析結果に従って動画（または音声）を書き出す。"""
     converted_audio = None
-    if settings.changes_voice:
+    semitones, formant = settings.resolve_voice(result.source_f0)
+    if semitones or formant != 1.0:
         if progress_callback:
             progress_callback(0.1, "声色を変換中...")
         converted_audio = voice_changer.convert_voice_file(
             os.path.join(work_dir, "source_audio.wav"),
             os.path.join(work_dir, "converted_audio.wav"),
-            semitones=settings.pitch_shift_semitones,
-            formant_ratio=settings.formant_ratio,
+            semitones=semitones,
+            formant_ratio=formant,
             method=settings.pitch_method,
         )
 
