@@ -26,3 +26,9 @@ output/
 *.srt
 *.ass
 .DS_Store
+
+# iOS
+ios/*.xcodeproj/
+ios/build/
+ios/DerivedData/
+*.xcuserstate
